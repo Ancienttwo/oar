@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR bc1b2ac for explicit native interaction approval policy (Apache-2.0).
 import { sessionCredentialRedactor } from "../../shared/credential-redactor.js";
 import { ModelConfirmationError } from "../../contracts/model-confirmation-error.js";
 import path from "node:path";
@@ -66,7 +67,7 @@ function workspaceRoots(options: SessionOptions): string[] | null {
  * codex reports for this session goes.
  */
 export function codexThreadOpen(
-  options: SessionOptions,
+  options: SessionOptions & { readonly approvalPolicy?: "never" | "on-request" },
   sandboxMode: string = codexLaunchSandboxMode(options),
 ): { readonly method: CodexOpenMethod; readonly params: JsonRecord; readonly redact: (text: string) => string } {
   refuseSessionOptions(codexRefusedSessionOptions, options);
@@ -102,7 +103,8 @@ export function codexThreadOpen(
   const modelParams = options.model === undefined ? {} : { model: options.model };
   const roots = workspaceRoots(options);
   const directoryParams = roots === null ? {} : { runtimeWorkspaceRoots: roots };
-  const approvalParams = options.nativePermissions === "inherit" ? {} : { approvalPolicy: "never" };
+  // BYOK change: caller-owned interaction opt-in; the default stays "never".
+  const approvalParams = options.approvalPolicy === undefined && options.nativePermissions === "inherit" ? {} : { approvalPolicy: options.approvalPolicy ?? "never" };
   const resumeSandboxParams = codexResumeSandboxParams(options, sandboxMode);
   if (options.resume === undefined) {
     return {
