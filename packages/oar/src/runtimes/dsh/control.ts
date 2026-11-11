@@ -1,6 +1,7 @@
-import { reportedStderr, reportedProcessFailure } from "../../shared/executable/reported-stderr.js";
-import type { LineProcess } from "../../shared/executable/index.js";
+// BYOK change: Modified from OAR bc1b2ac for the injected process and its bounded diagnostics (Apache-2.0).
+import { reportedStderr } from "../../shared/executable/reported-stderr.js";
 import { asRecord, parseJson, type JsonRecord } from "../../shared/json.js";
+import type { LineProcess } from "../codex/app-server-client.js";
 import { DSH_BRIDGE_PROTOCOL } from "./bridge.js";
 
 /** Measured cold starts stay near one second; this bounds a stuck loader, not an ordinary start. */
@@ -44,7 +45,7 @@ export interface DshControl {
  * order, a line that is not an object included, so nothing the process said is lost.
  */
 export function dshControl(child: LineProcess, receive: (message: JsonRecord) => void, redact?: (text: string) => string, profileLoaded?: () => void): DshControl {
-  const stderr = (): string => reportedStderr(child.diagnostics(), redact);
+  const stderrOf = (process: LineProcess): string => reportedStderr({ stderr: process.exitError?.().message ?? "" }, redact);
   let sequence = 0;
   let ended = false;
   const pending = new Map<string, { resolve(value: JsonRecord): void; reject(error: Error): void; timer: NodeJS.Timeout | undefined }>();
@@ -52,7 +53,7 @@ export function dshControl(child: LineProcess, receive: (message: JsonRecord) =>
   // A rejected startup may be observed only after the opening awaits it.
   void (async (): Promise<void> => { try { await ready; } catch { /* The opening reports it. */ } })();
   const readyTimer = setTimeout(() => {
-    rejectReady(new Error(`DSH did not load the OAR bridge within ${String(DSH_READY_TIMEOUT_MS)} ms: ${stderr()}`));
+    rejectReady(new Error(`DSH did not load the OAR bridge within ${String(DSH_READY_TIMEOUT_MS)} ms: ${stderrOf(child)}`));
     child.kill();
   }, DSH_READY_TIMEOUT_MS);
   child.onLine((line) => {
@@ -78,10 +79,10 @@ export function dshControl(child: LineProcess, receive: (message: JsonRecord) =>
       rejectReady(new DshCommandError(asRecord(message.error) ?? {}, textOf(message.code), textOf(message.capability)));
     }
   });
-  child.onExit(() => {
+  child.onExit((code) => {
     ended = true;
     clearTimeout(readyTimer);
-    const failure = dshExitedError(reportedProcessFailure("DSH exited", child.diagnostics(), redact).message);
+    const failure = dshExitedError(`DSH exited (${String(code)}): ${stderrOf(child)}`);
     rejectReady(failure);
     for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);
@@ -98,7 +99,7 @@ export function dshControl(child: LineProcess, receive: (message: JsonRecord) =>
       const { promise, resolve, reject } = Promise.withResolvers<JsonRecord>();
       const timer = timeoutMs === null ? undefined : setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`DSH did not answer ${method} within ${String(timeoutMs)} ms: ${stderr()}`));
+        reject(new Error(`DSH did not answer ${method} within ${String(timeoutMs)} ms: ${stderrOf(child)}`));
         child.kill();
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
