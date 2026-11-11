@@ -1,74 +1,78 @@
-import { appendStartupStderr, sessionExitReason } from "../executable/reported-stderr.js";
-import { streamJsonAppRequest } from "./permission.js";
-import { streamJsonResultReadback } from "./result-readback.js";
+// BYOK change: Modified from OAR bc1b2ac for a caller-owned process, a record consumer, caller-answered app requests and session credential redaction without sealSession (Apache-2.0).
 import { writeHeldInput, type HeldStreamJsonInput } from "./held-input.js";
 import { streamJsonTaskControl } from "./task-control.js";
 import { streamJsonCompaction } from "./compaction.js";
 /* oxlint-disable import/max-dependencies -- The driver composes protocol, input and process-lifetime mechanisms. */
-import type { ControlResult, InputOptions, RequestRecord, Session } from "../../contracts/session.js";
+import type { AdapterSession, ControlResult, InputOptions, RawEvent, RequestRecord } from "../../contracts/session.js";
 import { createAbortFallback } from "../abort-fallback.js";
 import { withInputImages } from "../input-images.js";
 import { enqueueHeld, withdrawControl } from "../held-input.js";
-import type { JsonRecord } from "../json.js";
-import type { SessionCredentials } from "../session-credentials.js";
-import { appendCleanupFailure, cleanupFailureReason } from "../executable/process-cleanup.js";
-import type { LineProcess } from "../executable/index.js";
-import type { CancellationObservation } from "../executable/process-cancellation.js";
+import { asRecord, parseJson, type JsonRecord } from "../json.js";
+// BYOK change: the injected line process, one credential redactor per open and the upstream kernel; no SessionCredentials or executable manager.
+import type { LineProcess } from "../../runtimes/codex/app-server-client.js";
+import type { CredentialRedactor } from "../credential-redactor.js";
+import { createSessionKernel } from "../session-kernel.js";
 import { streamJsonUserMessage, streamJsonPrompted } from "./input-lifecycle.js";
 import { foldStreamJsonStdout } from "./projection.js";
 import { streamJsonAbortRequested, type StreamJsonProjectionState, type StreamJsonSessionState } from "./state.js";
 import type { StreamJsonSessionProfile } from "./profile.js";
 
+/** BYOK change: caller hooks. The record consumer sees every record; the caller alone answers a runtime request. */
+export interface StreamJsonSessionHooks {
+  readonly onRecord?: (record: RawEvent) => void;
+  /** Every `toApp` request, whatever its type. `respond` writes the native reply and records it; a request never answered stays unanswered. */
+  readonly onAppRequest?: (request: { readonly id: string; readonly type: string; readonly native: JsonRecord }, respond: (reply: JsonRecord) => Promise<void>) => void;
+  /** Runs before the native interrupt is written; a throw rejects the abort with code `error` and writes no interrupt. */
+  readonly beforeInterrupt?: () => void;
+}
+
 /** Shared line protocol driver. A runtime launches its own process and supplies its own readbacks. */
 export async function streamJsonSession<S extends StreamJsonProjectionState>(
   child: LineProcess,
   sessionId: string,
-  credentials: SessionCredentials,
+  credentials: CredentialRedactor, // BYOK change: the caller builds it with sessionCredentialRedactor.
   profile: StreamJsonSessionProfile<S>,
-): Promise<Session> {
-  const kernel = credentials.kernel(sessionId);
+  hooks: StreamJsonSessionHooks = {},
+): Promise<AdapterSession> {
+  // BYOK change: the upstream kernel with the redactor as its redact hook; the record consumer is registered before any record is appended.
+  const kernel = createSessionKernel(sessionId, credentials.redactValue);
+  if (hooks.onRecord !== undefined) { kernel.rawEvents(hooks.onRecord); }
   const tasks = profile.stopTask === undefined ? undefined : streamJsonTaskControl(kernel, child, profile.stopTask);
   const userMessage = profile.userMessage ?? streamJsonUserMessage;
-  const state: StreamJsonSessionState<S> = { child, active: null, projection: profile.initial };
+  const state: StreamJsonSessionState<S> = { child, active: null, projection: profile.initial, disposed: false };
   // Hold queues until turn end; active-turn writes may steer or become an irreversible native queue.
   const commandLifecycle = profile.projection.commandLifecycle !== false;
   const writtenQueues = new Map<string, RequestRecord>();
   const heldQueue: HeldStreamJsonInput[] = [];
   let dispatching = false;
-  const nativeBusy = (): boolean => !messages.settling() && (state.active !== null || state.projection.nativeTurnActive);
+  const nativeBusy = (): boolean => state.active !== null || state.projection.nativeTurnActive;
   const compaction = streamJsonCompaction(kernel, profile, state, drainHeld, () => heldQueue.length > 0);
-  const busy = (): boolean => dispatching || messages.settling() || nativeBusy() || compaction?.busy() === true;
+  const busy = (): boolean => dispatching || nativeBusy() || compaction?.busy() === true;
   let canCancelQueued = false;
   const abortFallback = createAbortFallback(() => { child.kill(); });
   const pendingInterrupts = new Map<string, () => void>();
-  let turnRevision = 0;
-  let observingCancellation: { readonly revision: number; readonly result: Promise<CancellationObservation> } | null = null;
-  let cancellation: CancellationObservation | null = null;
-  const waitForCancellation = async (): Promise<void> => {
-    try { await observingCancellation?.result; } catch { /* The abort reports observation failure; later input still proceeds. */ }
-  };
-  const sentInterrupts = new Set<string>();
-  const completeCancellation = (): void => {
-    cancellation?.complete(); cancellation = null; sentInterrupts.clear();
-  };
-  const refuseCancellation = (requestId: string): void => {
-    sentInterrupts.delete(requestId);
-    if (sentInterrupts.size === 0) { completeCancellation(); }
-  };
+  let disposeRequest: RequestRecord | null = null;
+  // BYOK change: no upstream cancellation observation window; the caller's beforeInterrupt runs synchronously before the interrupt.
   function drainHeld(): void {
-    if (messages.hasExited() || kernel.unreachable() !== null || busy() || observingCancellation !== null || heldQueue[0]?.accepted !== true) { return; }
+    if (state.disposed || kernel.unreachable() !== null || busy() || heldQueue[0]?.accepted !== true) { return; }
     const next = heldQueue.shift();
     if (next === undefined) { return; }
     dispatching = true;
     const { inputId: _inputId, ...options } = next.options;
     const request = kernel.request("toRuntime", { kind: "prompt", input: next.input, ...options, carries: [next.inputId ?? next.request.id] });
-    const response = writeHeldInput(state, next, { kernel, commandLifecycle, writtenQueues, held: heldQueue, userMessage, advance: () => { turnRevision += 1; dispatching = false; } });
+    const response = writeHeldInput(state, next, { kernel, commandLifecycle, writtenQueues, held: heldQueue, userMessage, advance: () => { dispatching = false; } });
     dispatching = false;
     kernel.respond(request.id, response);
     if (response.kind === "accepted") { drainHeld(); }
   }
-  const processMessage = (message: JsonRecord, receivedAt: number): void => {
-    const wasBusy = busy();
+  // The fold translates and attributes facts; this driver owns transport, busy and queue drain.
+  child.onLine((line) => {
+    const message = asRecord(parseJson(line));
+    if (message === null) { return; }
+    if (message.type === "system" && message.subtype === "init" && typeof message.parent_tool_use_id !== "string" && Array.isArray(message.capabilities)) {
+      canCancelQueued = profile.cancelQueuedCapability !== undefined && message.capabilities.includes(profile.cancelQueuedCapability);
+    }
+    if (tasks?.consume(message) === true || profile.consume(message)) { return; }
     const { state: nextProjection, commands } = foldStreamJsonStdout(profile.projection, state.projection, message);
     state.projection = nextProjection;
     if (message.type === "command_lifecycle" && message.state === "queued" && typeof message.command_uuid === "string") {
@@ -83,15 +87,11 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
     for (const command of commands) {
       switch (command.kind) {
         case "frame": {
-          // A spontaneous start can arrive at init or at a later queued receipt.
-          if (!wasBusy && command.agentPath.length === 0 && command.body.events.some((event) => event.kind === "turn_active" && event.inputId === undefined)) {
-            turnRevision += 1;
-          }
           const nativeResponse = profile.compaction?.responseTo?.(message);
           const correlated = command.agentPath.length === 0 && nativeResponse !== undefined && nativeResponse === compaction?.requestId();
           const closes = command.agentPath.length === 0 && (correlated || command.body.events.some((event) => event.kind === "turn_ended"));
           if (closes) {
-            abortFallback.clear(); completeCancellation(); turnRevision += 1;
+            abortFallback.clear();
             if (state.projection.pendingInputId === null) { state.active = null; }
             if (correlated && state.projection.nativeTurnActive) {
               state.projection = { ...state.projection, nativeTurnActive: false, turnActive: false };
@@ -102,7 +102,7 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
             writtenQueues.delete(cancelled.inputId);
             if (state.active !== null && cancelled.inputId === (state.active.body.kind === "compact" ? state.active.id : ("inputId" in state.active.body ? state.active.body.inputId : undefined))) { state.active = null; }
           }
-          const record = kernel.frame(correlated ? { ...command.body, responseTo: nativeResponse } : command.body, { agentPath: command.agentPath, receivedAt });
+          const record = kernel.frame(correlated ? { ...command.body, responseTo: nativeResponse } : command.body, { agentPath: command.agentPath });
           if (record.agentPath.length > 0) { break; }
           ended ||= closes;
           dropped ||= cancelled !== undefined;
@@ -112,9 +112,7 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
           const refused = pendingInterrupts.get(command.requestId);
           if (refused !== undefined) {
             pendingInterrupts.delete(command.requestId);
-            if (command.body.kind === "rejected") {
-              refused(); refuseCancellation(command.requestId);
-            }
+            if (command.body.kind === "rejected") { refused(); }
             kernel.respond(command.requestId, command.body);
           } else {
             // Preserve late/duplicate stdout after exit without answering a request twice.
@@ -122,43 +120,32 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
           }
           break;
         }
-        case "toApp":
-          streamJsonAppRequest(kernel, child, command.id, command.type, message, profile.permissionResponse);
+        case "toApp": {
+          kernel.request("toApp", { kind: "native", type: command.type, native: command.native }, { id: command.id });
+          // BYOK change: every runtime request goes to the caller, whatever its type; profile.permissionResponse is not read.
+          // Without a hook, or when the hook does not answer, the request stays unanswered: nothing here allows by default.
+          hooks.onAppRequest?.({ id: command.id, type: command.type, native: message }, async (reply) => {
+            await child.writeAcknowledged(`${JSON.stringify(reply)}\n`);
+            kernel.respond(command.id, { kind: "accepted", native: reply });
+          });
           break;
+        }
         default:
           break;
       }
     }
     if (dropped && !ended && !busy()) {
-      abortFallback.clear(); completeCancellation(); turnRevision += 1;
+      abortFallback.clear();
       if (state.projection.pendingInputId === null) { state.active = null; }
     }
     if (ended || (dropped && !busy())) { drainHeld(); }
-  };
-  const messages = streamJsonResultReadback(child, {
-    before: (): Promise<void> | void => {
-      if (profile.beforeRootResult === undefined || kernel.unreachable() !== null) { return; }
-      // Native work has ended; hold input without interrupting a completed turn during readback.
-      abortFallback.clear(); completeCancellation(); turnRevision += 1;
-      return profile.beforeRootResult(kernel, state.projection);
-    },
-    process: processMessage,
-    consume: (message) => {
-      if (message.type === "system" && message.subtype === "init" && typeof message.parent_tool_use_id !== "string" && Array.isArray(message.capabilities)) {
-        canCancelQueued = profile.cancelQueuedCapability !== undefined && message.capabilities.includes(profile.cancelQueuedCapability);
-      }
-      return tasks?.consume(message) === true || profile.consume(message);
-    },
-    exiting: profile.exited,
-    exited: (code, reason) => { finishExit(code, reason); },
   });
-  const finishExit = (code: number | null, cleanupReason?: string): void => {
-    abortFallback.clear(); completeCancellation(); turnRevision += 1;
+  // BYOK change: the injected line process reports no cleanup reason; only the profile's exit reason is recorded.
+  child.onExit((code) => {
+    abortFallback.clear();
     // An exit before fallback still precedes the rejected pending controls.
-    const reasons = [profile.exitReason?.(), sessionExitReason(child, cleanupReason, credentials.redact)].filter(value => value !== undefined);
-    const reason = reasons.length === 0 ? undefined : reasons.join("; ");
-    // This Session owns one child. Its projection, including open compactions, ends here.
-    kernel.processExited(code, reason);
+    const reason = profile.exitReason?.();
+    kernel.respond(disposeRequest?.id ?? "", { kind: "exited", code, ...(reason === undefined ? {} : { reason }) });
     state.active = null;
     state.projection = { ...state.projection, nativeTurnActive: false, turnActive: false };
     for (const requestId of pendingInterrupts.keys()) {
@@ -166,40 +153,38 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
       kernel.respond(requestId, { kind: "rejected", code: "runtime_exited", reason: "runtime exited" });
     }
     tasks?.end();
-  };
-  messages.listen();
+    profile.exited(code);
+  });
+  // BYOK change: an open failure is redacted; the caller owns the process and releases it.
   try {
     await profile.open({ current: () => state.projection, replace: (projection) => { state.projection = projection; }, report: (body) => { kernel.frame(body); } });
-  } catch (error) {
-    const diagnostics = child.diagnostics();
-    const failure = messages.hasExited() ? appendStartupStderr(error, diagnostics, credentials.redact) : error;
-    throw appendCleanupFailure(failure, cleanupFailureReason(diagnostics.cleanup));
-  }
+  } catch (error) { throw credentials.redactValue(error); }
   let interruptCounter = 0;
   const capabilities = profile.capabilities;
-  return credentials.seal({
+  // BYOK change: the upstream credentials.seal guard without sealSession: a control's thrown error is redacted.
+  const guard = <Args extends unknown[], Result>(method: (...args: Args) => Promise<Result>, cleanResult = false) =>
+    async (...args: Args): Promise<Result> => {
+      try { const result = await method(...args); return cleanResult ? credentials.redactValue(result) : result; } catch (error) { throw credentials.redactValue(error); }
+    };
+  const session: AdapterSession = { // BYOK change: raw adapter session without sealSession.
     id: kernel.sessionId,
     capabilities,
-    ...(compaction === null ? {} : { compact: compaction.compact }),
-    ...(tasks === undefined ? {} : { stopTask: tasks.stop }),
-    prompt: async (input, inputOptions?: InputOptions): Promise<ControlResult> => {
-      if (observingCancellation !== null) { await waitForCancellation(); }
+    ...(compaction === null ? {} : { compact: guard(compaction.compact, true) }),
+    ...(tasks === undefined ? {} : { stopTask: guard(tasks.stop) }),
+    prompt: guard(async (input: string, inputOptions?: InputOptions): Promise<ControlResult> => {
       const body = { kind: "prompt" as const, input, ...inputOptions };
       return kernel.control(body, (request) => {
-        if (messages.hasExited()) { return { kind: "rejected", code: "runtime_exited" as const, reason: "runtime exited" }; }
         if (busy() || heldQueue.length > 0) { return { kind: "rejected", code: "busy", reason: "busy" }; }
         return withInputImages(capabilities, inputOptions?.images, (images) => {
-          turnRevision += 1;
           state.active = request;
           state.projection = streamJsonPrompted(state.projection, inputOptions?.inputId, true, commandLifecycle);
           child.write(userMessage(input, inputOptions?.inputId, images));
           return { kind: "accepted" };
         });
       });
-    },
+    }),
     ...(profile.steer ? {
-      steer: async (input: string, inputOptions?: InputOptions): Promise<ControlResult> => {
-        if (observingCancellation !== null) { await waitForCancellation(); }
+      steer: guard(async (input: string, inputOptions?: InputOptions): Promise<ControlResult> => {
         return kernel.control({ kind: "steer", input, ...inputOptions }, () => {
           if (compaction?.busy() === true) { return { kind: "rejected", code: "busy", reason: "Manual compaction is still in progress" }; }
           if (!nativeBusy()) { return { kind: "rejected", code: "no_active_turn", reason: "not_steerable: no active turn" }; }
@@ -208,12 +193,13 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
             return { kind: "accepted" };
           });
         });
-      },
+      }),
     } : {}),
-    queue: async (input, inputOptions?: InputOptions): Promise<ControlResult> => {
+    queue: guard(async (input: string, inputOptions?: InputOptions): Promise<ControlResult> => {
       const result = await kernel.control({ kind: "queue", input, ...inputOptions }, (request) =>
         withInputImages(capabilities, inputOptions?.images, (images) => {
-          if (messages.hasExited()) { return { kind: "rejected", code: "runtime_exited" as const, reason: "runtime exited" }; }
+          const unreachable = kernel.unreachable();
+          if (unreachable !== null) { return unreachable; }
           enqueueHeld(heldQueue, { request, input, ...(inputOptions?.inputId === undefined ? {} : { inputId: inputOptions.inputId }), options: { ...inputOptions }, images });
           return { kind: "accepted", queued: "adapter" };
         }));
@@ -221,9 +207,9 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
       if (entry !== undefined && result.response.body.kind === "accepted") { entry.accepted = true; }
       drainHeld();
       return result;
-    },
-    withdraw: async inputId => { const result = await withdrawControl(kernel, heldQueue)(inputId); drainHeld(); return result; },
-    abort: async (): Promise<ControlResult> => {
+    }),
+    withdraw: guard(async (inputId: string) => { const result = await withdrawControl(kernel, heldQueue)(inputId); drainHeld(); return result; }),
+    abort: guard(async (): Promise<ControlResult> => {
       // The matching control_response answers interrupt; the result frame ends the turn.
       interruptCounter += 1;
       const requestId = `interrupt-${interruptCounter}`;
@@ -234,24 +220,11 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
       if (blocked !== null || (!nativeBusy() && compaction?.busy() !== true && !(canCancelQueued && state.projection.unstartedInputs.size > 0))) {
         return { request, response: kernel.respond(request.id, blocked ?? { kind: "rejected", code: "no_active_turn", reason: "no active turn" }) };
       }
-      const revision = turnRevision;
-      observingCancellation ??= { revision, result: cancellation === null ? child.observeCancellation() : Promise.resolve(cancellation) };
-      const window = observingCancellation;
-      let observation: CancellationObservation | null = null;
-      try { observation = await window.result; }
+      // BYOK change: the caller's synchronous hook replaces the upstream cancellation observation; no interrupt goes out unless it returns.
+      try { hooks.beforeInterrupt?.(); }
       catch (error) {
         return { request, response: kernel.respond(request.id, { kind: "rejected", code: "error", reason: error instanceof Error ? error.message : String(error) }) };
-      } finally {
-        // Preserve the observed turn until interrupt has been written. A
-        // drained arrival must not advance its revision before that check.
-        if (observingCancellation === window) { observingCancellation = null; queueMicrotask(drainHeld); }
       }
-      const afterObservation = kernel.unreachable();
-      if (turnRevision !== revision || window.revision !== revision || afterObservation !== null) {
-        observation.complete();
-        return { request, response: kernel.respond(request.id, afterObservation ?? { kind: "rejected", code: "no_active_turn", reason: "turn ended before cancellation was sent" }) };
-      }
-      cancellation = observation;
       state.projection = streamJsonAbortRequested(state.projection);
       const { promise, resolve } = Promise.withResolvers<ControlResult>();
       const unsubscribe = kernel.rawEvents((record) => {
@@ -267,27 +240,37 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
         }
       });
       if (pendingInterrupts.has(requestId)) { pendingInterrupts.set(requestId, refuse); }
-      observation.commit(); sentInterrupts.add(requestId);
-      const interrupt = { subtype: "interrupt", ...(canCancelQueued && state.projection.unstartedInputs.size > 0 ? { cancel_queued: true } : {}) };
-      child.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request: interrupt })}\n`);
+      child.write(`${JSON.stringify({
+        type: "control_request",
+        request_id: requestId,
+        request: { subtype: "interrupt", ...(canCancelQueued && state.projection.unstartedInputs.size > 0 ? { cancel_queued: true } : {}) },
+      })}\n`);
       const result = await promise;
       unsubscribe();
       return result;
-    },
+    }),
     rawEvents: (observer, cursor) => kernel.rawEvents(observer, cursor),
     records: () => kernel.records(),
     graph: () => kernel.graph(),
-    resources: child.resources,
-    ...(profile.lastModelRequest === undefined ? {} : { lastModelRequest: profile.lastModelRequest }),
+    // BYOK change: the injected line process has no resources reader, and the SDK profile exposes no model request.
     ...(profile.contextBreakdown === undefined ? {} : { contextBreakdown: profile.contextBreakdown }),
-    dispose: async () => {
-      await kernel.dispose(async () => {
-        profile.disposing();
-        tasks?.end();
-        if (profile.close === undefined) { child.kill(); }
-        else { await profile.close(busy()); }
-        await child.exited; // release point for anything the process held; the exit response is recorded by onExit
-      }, () => { profile.disposing(); });
-    },
-  });
+    dispose: guard(async () => {
+      if (state.disposed) { return; }
+      state.disposed = true;
+      // stdin ends now: no query may write to it any more.
+      profile.disposing();
+      const gone = kernel.unreachable() !== null; // only an observed exit can say so before this dispose is recorded
+      disposeRequest = kernel.request("toRuntime", { kind: "dispose" });
+      tasks?.end();
+      if (gone) {
+        // The exit is already recorded; nothing is left to release.
+        kernel.respond(disposeRequest.id, { kind: "accepted" });
+        return;
+      }
+      if (profile.close === undefined) { child.kill(); }
+      else { await profile.close(busy()); }
+      await child.exited; // release point for anything the process held; the exit response is recorded by onExit
+    }),
+  };
+  return session;
 }
