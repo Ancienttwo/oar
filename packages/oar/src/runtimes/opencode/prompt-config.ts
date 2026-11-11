@@ -1,13 +1,15 @@
+// BYOK change: Modified from OAR bc1b2ac for SDK-owned processes and explicit environments (Apache-2.0).
 import { sessionEnvironment } from "../../shared/environment.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { UnsupportedOptionError } from "../../contracts/errors.js";
 import type { SessionOptions } from "../../contracts/session.js";
 import { checkResume } from "../../shared/session-options.js";
-import { processFailure } from "../../shared/executable/diagnostics.js";
-import { runExecutable, type ExecutableRunner } from "../../shared/executable/run.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
 import { privateTempDir } from "../../shared/private-temp.js";
+
+// BYOK: native configuration queries use the SDK-owned terminal process seam.
+export type ExecutableRunner = (command: string, args: readonly string[], options: { cwd: string; env: Readonly<Record<string, string | undefined>>; timeoutMs: number }) => Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number | null }>;
 
 export interface OpenCodePromptConfig {
   readonly options: SessionOptions;
@@ -24,7 +26,7 @@ export function validateOpenCodePrompts(options: SessionOptions): void {
   if (options.systemPrompt === undefined && options.appendSystemPrompt === undefined) {
     return;
   }
-  if (sessionEnvironment(options.env).OPENCODE_CONFIG_CONTENT !== undefined) {
+  if (sessionEnvironment(options.env, {}).OPENCODE_CONFIG_CONTENT !== undefined) {
     throw new UnsupportedOptionError(option, "opencode prompt options require OPENCODE_CONFIG_CONTENT, which is already set in the effective session environment");
   }
   // An empty agent.prompt selects the built-in prompt in native request.ts.
@@ -34,10 +36,10 @@ export function validateOpenCodePrompts(options: SessionOptions): void {
 }
 
 async function query(command: string, args: readonly string[], options: SessionOptions, run: ExecutableRunner): Promise<JsonRecord> {
-  const result = await run(command, args, { cwd: options.cwd, env: sessionEnvironment(options.env), timeoutMs: 30_000 });
+  const result = await run(command, args, { cwd: options.cwd, env: sessionEnvironment(options.env, {}), timeoutMs: 30_000 });
   const label = `opencode ${args[0] ?? "query"}`;
   if (!result.ok) {
-    throw processFailure(`${label} failed while resolving the session's agent`, result.diagnostics ?? { exitCode: result.exitCode, signal: null, stderr: result.stderr });
+    throw new Error(`${label} failed while resolving the session's agent (exit ${result.exitCode})`);
   }
   let parsed: JsonRecord | null = null;
   try {
@@ -120,7 +122,7 @@ export function configContent(overlay: JsonRecord): string {
 }
 
 /** Native config overlay only; never copy, merge or rewrite user config. */
-export async function prepareOpenCodePrompts(command: string, options: SessionOptions, run: ExecutableRunner = runExecutable): Promise<OpenCodePromptConfig> {
+export async function prepareOpenCodePrompts(command: string, options: SessionOptions, run: ExecutableRunner): Promise<OpenCodePromptConfig> {
   validateOpenCodePrompts(options);
   const agent = options.systemPrompt === undefined ? undefined : await activeAgent(command, options, run);
   const instructions = await instructionsFile(options.appendSystemPrompt);
