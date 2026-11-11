@@ -1,6 +1,4 @@
-import { reportedProcessFailure } from "../executable/reported-stderr.js";
-import type { ProcessDiagnostics } from "../executable/diagnostics.js";
-
+// BYOK change: Modified from OAR bc1b2ac; native process diagnostics stay SDK-owned (Apache-2.0).
 export type AcpErrorKind = "timeout" | "process_exited";
 
 /** One transport error class with a discriminant instead of four nominal wrappers. */
@@ -36,16 +34,11 @@ export function acpRequestTimeoutError(method: string, timeoutMs: number): AcpEr
   });
 }
 
-export function acpProcessExitedError(
-  exitCode: number | null,
-  diagnostics?: ProcessDiagnostics,
-  redact: (text: string) => string = (text) => text,
-): AcpError {
-  // Authentication queries omit diagnostics. A shared session supplies only process-wide facts.
-  const failure = diagnostics === undefined ? undefined : reportedProcessFailure("ACP process exited", diagnostics, redact);
+// BYOK change: no native diagnostic bundle; the SDK transport owns the child's bounded stderr and exit.
+export function acpProcessExitedError(exitCode: number | null): AcpError {
   return new AcpError(
     "process_exited",
-    failure?.message ?? (exitCode === null ? "ACP process exited" : `ACP process exited with code ${exitCode}`),
-    { exitCode, ...(failure === undefined ? {} : { cause: failure.cause }) },
+    exitCode === null ? "ACP process exited" : `ACP process exited with code ${exitCode}`,
+    { exitCode },
   );
 }
