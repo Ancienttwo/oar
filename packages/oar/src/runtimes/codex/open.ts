@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR bc1b2ac for explicit native interaction approval policy (Apache-2.0).
 import { sessionCredentialRedactor } from "../../shared/credential-redactor.js";
 import { ModelConfirmationError } from "../../contracts/model-confirmation-error.js";
 import path from "node:path";
@@ -63,7 +64,7 @@ function workspaceRoots(options: SessionOptions): string[] | null {
  * for the MCP credentials its `config` carries, through which every error
  * codex reports for this session goes.
  */
-export function codexThreadOpen(options: SessionOptions): { readonly method: CodexOpenMethod; readonly params: JsonRecord; readonly redact: (text: string) => string } {
+export function codexThreadOpen(options: SessionOptions & { readonly approvalPolicy?: "never" | "on-request" }): { readonly method: CodexOpenMethod; readonly params: JsonRecord; readonly redact: (text: string) => string } {
   refuseSessionOptions(codexRefusedSessionOptions, options);
   validateCodexToolDenials(options);
   checkSessionName(options);
@@ -106,7 +107,7 @@ export function codexThreadOpen(options: SessionOptions): { readonly method: Cod
         ...directoryParams,
         ...modelParams,
         ...tierParams,
-        approvalPolicy: "never",
+        approvalPolicy: options.approvalPolicy ?? "never", // BYOK change: caller-owned interaction opt-in.
         // Required in addition to initialize.experimentalApi. This exposes
         // the completed Responses API reasoning item, whose encrypted_content
         // lets us distinguish redaction from genuinely empty reasoning.
@@ -161,7 +162,7 @@ export function codexThreadOpen(options: SessionOptions): { readonly method: Cod
       // oar session owns its own app-server process.
       ...modelParams,
       ...tierParams,
-      approvalPolicy: "never",
+      approvalPolicy: options.approvalPolicy ?? "never", // BYOK change: caller-owned interaction opt-in.
       ...instructionParams,
       ...configParams(mcpConfig),
     },
