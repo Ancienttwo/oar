@@ -1,3 +1,4 @@
+// BYOK change (Apache-2.0): route appended persona rules through documented session metadata.
 import { grokTaskViews } from "./tasks.js";
 /* oxlint-disable import/max-dependencies -- Session profiles and assembly wire the native control, projection and lifecycle helpers. */
 import { refuseSessionOptions } from "../../shared/session-options.js";
@@ -39,7 +40,6 @@ export function grokInitializeMeta(options: SessionOptions): JsonRecord {
       skipProjectLayout: true,
     },
     ...(options.systemPrompt === undefined ? {} : { systemPromptOverride: options.systemPrompt }),
-    ...(options.appendSystemPrompt === undefined ? {} : { rules: options.appendSystemPrompt }),
   };
 }
 
@@ -172,7 +172,8 @@ export const grokAcpProfile: AcpSessionProfile = {
       throw new UnsupportedOptionError("appendSystemPrompt", "Grok does not reapply appendSystemPrompt alone on resume, even after compaction. Omit appendSystemPrompt to retain the saved append; to change it, also supply systemPrompt.");
     }
   },
-  sessionMeta: () => ({ yoloMode: true }),
+  // BYOK change: Grok documents rules on session/new, not initialize. Resume refusal above remains intact.
+  sessionMeta: (options) => ({ yoloMode: true, ...(options.appendSystemPrompt === undefined ? {} : { rules: options.appendSystemPrompt }) }),
   selectAuthMethod: selectGrokAuthMethod,
   // `_meta.sendNow` is not an injection: grok answers the running prompt
   // `cancelled` (`cancelTrigger: "send_now"`, live 1.0.25) and starts a fresh
