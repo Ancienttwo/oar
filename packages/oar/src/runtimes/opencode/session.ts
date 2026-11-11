@@ -1,16 +1,17 @@
+// BYOK change: Modified from OAR bc1b2ac for SDK-owned processes and explicit environments (Apache-2.0).
 /* oxlint-disable import/max-dependencies -- Session profiles and assembly wire the native control, projection and lifecycle helpers. */
 import type { RefusedSessionOptions } from "../../contracts/runtime.js";
-import { withSessionCredentials } from "../../shared/session-credentials.js";
 import { opencodeRefusedSessionOptions, opencodeV1RefusedSessionOptions } from "./options.js";
 import { opencodeCompaction, opencodeCompactionEvents } from "./compaction.js";
 import { hasBackgroundChildUpdates, opencodeRelease } from "./version.js";
 import { OPENCODE_CHILD_UPDATE, OPENCODE_CHILD_UPDATES, opencodeChildAttribution, opencodeChildTasks, opencodeChildUpdate, opencodeSpawnedSessions } from "./attribution.js";
 import { refuseSessionOptions } from "../../shared/session-options.js";
-import type { StartSession, Session } from "../../contracts/session.js";
-import { acpSession, type AcpSessionProfile } from "../../shared/acp/session.js";
+import type { AdapterSession as Session } from "../../contracts/session.js";
+import { acpSession, type AcpSessionProfile, type StartAcpSession } from "../../shared/acp/session.js";
+import { sessionCredentialRedactor } from "../../shared/credential-redactor.js";
 import { checkMcpServerNames } from "../../shared/mcp-servers.js";
 import { opencodeFailureOutcome } from "./failure.js";
-import { prepareOpenCodePrompts, validateOpenCodePrompts, verifyOpenCodeAgent } from "./prompt-config.js";
+import { prepareOpenCodePrompts, type ExecutableRunner, validateOpenCodePrompts, verifyOpenCodeAgent } from "./prompt-config.js";
 import { prepareOpenCodeV2Prompts, verifyOpenCodeAgents } from "./prompt-config-v2.js";
 import { acquireOpenCodeStartup } from "./startup-gate.js";
 import { opencodePromptTokenUsage } from "./token-usage.js";
@@ -106,60 +107,80 @@ function withPromptCleanup(session: Session, cleanup: () => Promise<void>): Sess
       await cleanup();
     }
   };
-  return { ...session, dispose: async () => { disposal ??= release(); await disposal; } };
+  return { ...session, dispose: async () => {
+    // BYOK change: a failed reclaim must remain retryable; concurrent callers still share the in-flight release.
+    disposal ??= release().catch((error: unknown) => { disposal = undefined; throw error; });
+    await disposal;
+  } };
 }
 
-export const opencodeSession: StartSession = withSessionCredentials(async (installation, options, _credentials, context) => {
-  refuseSessionOptions(opencodeRefusedSessionOptions, options);
-  // Invalid MCP entries fail before even the release-line helper can start.
-  checkMcpServerNames(options.mcpServers ?? []);
-  if (installation.via !== "executable") { throw new Error("opencode requires an executable installation"); }
-  const release = await opencodeRelease(installation, options);
-  if (release.major === 2) {
+// BYOK: processes, environment and observation are owned by the SDK ACP bridge.
+export const opencodeSession: StartAcpSession = async (spawn, terminal, installation, options, hooks = {}) => {
+  const credentials = sessionCredentialRedactor(options);
+  for (const value of hooks.credentialsForRedaction ?? []) { credentials.addExplicit(value); }
+  try {
+    if (installation.via !== "executable" || installation.version === undefined) { throw new Error("opencode requires a probed executable version"); }
+    refuseSessionOptions(opencodeRefusedSessionOptions, options);
+    // Invalid MCP entries fail before even the release-line helper can start.
+    checkMcpServerNames(options.mcpServers ?? []);
+    const release = await opencodeRelease(installation, options);
+    const v2 = release.major === 2;
     const background = hasBackgroundChildUpdates(release);
+    if (!v2) { refuseSessionOptions(opencodeV1RefusedSessionOptions, options); }
     if (options.systemPrompt === undefined && options.appendSystemPrompt === undefined) {
-      return (background ? backgroundChildSession : directV2Session)(installation, options, context);
+      const start = v2 ? (background ? backgroundChildSession : directV2Session) : directSession;
+      return await start(spawn, terminal, installation, options, hooks);
     }
-    const prepared = await prepareOpenCodeV2Prompts(installation.command, release, options);
+    // The prompts travel in OPENCODE_CONFIG_CONTENT, the session's MCP servers
+    // in the ACP open as on the direct path, after validation above.
+    validateOpenCodePrompts(options);
+    const queryRunner: ExecutableRunner = async (command, args, query) => {
+      const env = Object.fromEntries(Object.entries(query.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+      const process = terminal(command, args, { cwd: query.cwd, env, shell: false });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      let retained = 0;
+      let refuse!: (error: Error) => void;
+      const refused = new Promise<never>((_, reject) => { refuse = reject; });
+      const retain = (stream: "stdout" | "stderr", chunk: Buffer): void => {
+        retained += chunk.length;
+        if (retained > 2 * 1024 * 1024) { refuse(new Error("opencode configuration query exceeded its output budget")); return; }
+        (stream === "stdout" ? stdout : stderr).push(chunk);
+      };
+      process.child.stdout?.on("data", (chunk: Buffer) => { retain("stdout", chunk); });
+      process.child.stderr?.on("data", (chunk: Buffer) => { retain("stderr", chunk); });
+      const closed = new Promise<number | null>((resolve, reject) => {
+        process.child.once("close", resolve);
+        process.child.once("error", reject);
+      });
+      void closed.catch(() => {});
+      void refused.catch(() => {});
+      try {
+        timer = setTimeout(() => { refuse(new Error("opencode configuration query timed out")); }, query.timeoutMs);
+        await process.spawned;
+        const exitCode = await Promise.race([closed, refused]);
+        return { ok: exitCode === 0, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), exitCode };
+      } finally { clearTimeout(timer); await process.dispose(); }
+    };
+    const prepared = v2
+      ? await prepareOpenCodeV2Prompts(installation.command, release, options, queryRunner, hooks.credentialsForRedaction)
+      : await prepareOpenCodePrompts(installation.command, options, queryRunner);
+    const profile = v2 ? (background ? opencodeBackgroundChildProfile : opencodeV2AcpProfile) : opencodeAcpProfile;
     try {
       const session = await acpSession({
-        ...(background ? opencodeBackgroundChildProfile : opencodeV2AcpProfile),
+        ...profile,
         // oxlint-disable-next-line typescript/promise-function-async -- Synchronous read-back through an async ACP hook.
         configureSession: ({ response }) => {
-          if (prepared.agents !== undefined) {
-            verifyOpenCodeAgents(response, prepared.agents);
-          }
+          if (prepared.agents !== undefined) { verifyOpenCodeAgents(response, prepared.agents); }
+          if (prepared.agent !== undefined) { verifyOpenCodeAgent(response, prepared.agent); }
           return Promise.resolve();
         },
-      })(installation, prepared.options, context);
+      })(spawn, terminal, installation, { ...prepared.options, env: prepared.options.env as Readonly<Record<string, string>> }, hooks);
       return withPromptCleanup(session, prepared.cleanup);
     } catch (error) {
       await prepared.cleanup();
       throw error;
     }
-  }
-  refuseSessionOptions(opencodeV1RefusedSessionOptions, options);
-  if (options.systemPrompt === undefined && options.appendSystemPrompt === undefined) {
-    return directSession(installation, options, context);
-  }
-  // The prompts travel in OPENCODE_CONFIG_CONTENT, the session's MCP servers
-  // in the ACP open as on the direct path, after validation above.
-  validateOpenCodePrompts(options);
-  const prepared = await prepareOpenCodePrompts(installation.command, options);
-  try {
-    const session = await acpSession({
-      ...opencodeAcpProfile,
-      // oxlint-disable-next-line typescript/promise-function-async -- Synchronous read-back through an async ACP hook.
-      configureSession: ({ response }) => {
-        if (prepared.agent !== undefined) {
-          verifyOpenCodeAgent(response, prepared.agent);
-        }
-        return Promise.resolve();
-      },
-    })(installation, prepared.options, context);
-    return withPromptCleanup(session, prepared.cleanup);
-  } catch (error) {
-    await prepared.cleanup();
-    throw error;
-  }
-});
+  } catch (error) { throw credentials.redactValue(error); }
+};
