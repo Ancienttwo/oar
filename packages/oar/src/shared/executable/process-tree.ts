@@ -46,7 +46,9 @@ export type ProcessTableObservation = ProcessTableFailure | (ProcessTableRead & 
 });
 
 export class InvalidProcessTableError extends Error {
-  constructor(readonly reason: "invalid_output" | "missing_host" = "invalid_output") { super(reason); this.name = "InvalidProcessTableError"; }
+  // BYOK change: declare the field explicitly so Node's strip-only TypeScript loader accepts this source.
+  readonly reason: ProcessTableFailureReason;
+  constructor(reason: ProcessTableFailureReason = "invalid_output") { super(reason); this.name = "InvalidProcessTableError"; this.reason = reason; }
 }
 
 /** `/proc/<pid>/stat`'s ppid, pgrp and starttime (clock ticks since boot); null once the process is gone. */
@@ -93,7 +95,8 @@ function readProcfs(): ProcessTableRead {
 
 /** Other POSIX systems (macOS): one `ps` run; `lstart` is the start time to the second. */
 function readPs(): ProcessTableRead {
-  const output = execFileSync("ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], {
+  // BYOK change: run `ps` by its absolute path; the host's PATH may not name /bin.
+  const output = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C" },
     stdio: ["ignore", "pipe", "ignore"],
