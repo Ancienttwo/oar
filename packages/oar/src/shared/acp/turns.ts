@@ -143,6 +143,7 @@ export function createAcpTurns(deps: {
         });
         // Kimi's bounded late-usage wait precedes turn end so contextUsage()
         // at that end includes this turn's usage.
+        if (state.cancelWrite !== undefined) { await state.cancelWrite; } // BYOK change: see the failure branch.
         await usageGate.settleAfterPrompt(profile, state.abortRequested);
         const usage = promptUsage(result);
         const rootTurnRecords = (): readonly RawEvent[] => kernel.records().filter(record =>
@@ -177,6 +178,9 @@ export function createAcpTurns(deps: {
         await new Promise<void>((resolve) => {
           setImmediate(resolve);
         });
+        // BYOK change: an abort whose cancel write is still pending decides
+        // whether this failure is the abort's; a rejected write clears the mark.
+        if (state.cancelWrite !== undefined) { await state.cancelWrite; }
         const turnFrames = kernel.records().flatMap((record) => (record.kind === "frame" && record.seq > state.since ? [record.body] : []));
         const outcome = state.abortRequested ? { kind: "aborted" as const } : acpFailureOutcome(error, turnFrames, profile.failureOutcome, receivedAt);
         const refused = steered !== undefined && (profile.isSteerRefusal?.(error) === true || profile.steerOutcomeIsLatest !== true
