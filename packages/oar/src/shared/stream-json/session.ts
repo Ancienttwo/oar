@@ -17,7 +17,12 @@ import { foldStreamJsonStdout } from "./projection.js";
 import { streamJsonAbortRequested, type StreamJsonProjectionState, type StreamJsonSessionState } from "./state.js";
 import type { StreamJsonSessionProfile } from "./profile.js";
 
-/** BYOK change: an interrupt write not acknowledged within the kill fallback's own bound is a failed write. */
+/**
+ * BYOK change: an interrupt write not acknowledged within the kill fallback's own bound is treated as written,
+ * because its bytes can still reach Claude. Every Claude turn has the kill fallback, so once it is armed the
+ * requested abort happens within 10 s either way. ACP rolls a timed-out write back instead (#2044): there the
+ * kill disposes the whole session.
+ */
 const INTERRUPT_WRITE_TIMEOUT_MS = 10_000;
 
 /** BYOK change: caller hooks. The record consumer sees every record; the caller alone answers a runtime request. */
@@ -65,6 +70,8 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
   // the result is then folded with the mark the accepted interrupts leave.
   let heldLines: string[] | null = null;
   let exited = false;
+  // BYOK change: once the kill fallback fires, nothing more is dispatched to the process it kills.
+  let killing = false;
   const releaseHeld = (): void => {
     if (heldLines === null || (pendingInterrupts.size > 0 && !exited)) { return; }
     const lines = heldLines;
@@ -79,7 +86,7 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
   let disposeRequest: RequestRecord | null = null;
   // BYOK change: no upstream cancellation observation window; the caller's beforeInterrupt runs synchronously before the interrupt.
   function drainHeld(): void {
-    if (state.disposed || exited || kernel.unreachable() !== null || busy() || heldQueue[0]?.accepted !== true) { return; }
+    if (state.disposed || exited || killing || kernel.unreachable() !== null || busy() || heldQueue[0]?.accepted !== true) { return; }
     const next = heldQueue.shift();
     if (next === undefined) { return; }
     dispatching = true;
@@ -292,24 +299,20 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
       let timer: NodeJS.Timeout | undefined;
       void Promise.race([
         (async () => { await child.writeAcknowledged(line); })(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => { reject(new Error(`interrupt write did not complete within ${String(INTERRUPT_WRITE_TIMEOUT_MS)} ms`)); }, INTERRUPT_WRITE_TIMEOUT_MS);
-          timer.unref();
-        }),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, INTERRUPT_WRITE_TIMEOUT_MS); timer.unref(); }),
       ]).then(() => {
         clearTimeout(timer);
         // An answer can precede the acknowledgement; an accepted interrupt is still bounded.
         if (!aborting.has(requestId)) { return; }
         // A repeated abort during termination is taken over synchronously too.
+        // The held result is published at the exit, after the kill, so no queued input reaches this process.
         withdrawFallback = abortFallback.arm(() => {
-          if (pendingInterrupts.delete(requestId)) {
-            kernel.respond(requestId, { kind: "accepted" });
-            releaseHeld();
-          }
+          killing = true;
+          if (pendingInterrupts.delete(requestId)) { kernel.respond(requestId, { kind: "accepted" }); }
         });
       }, (error: unknown) => {
         clearTimeout(timer);
-        // An interrupt that was never written leaves the turn as it was: no mark, no fallback kill.
+        // A write that failed was never written: it leaves the turn as it was, no mark, no fallback kill.
         const refused = pendingInterrupts.get(requestId);
         if (refused === undefined) { return; }
         pendingInterrupts.delete(requestId);
