@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR bc1b2ac so only tool uses inside an agent are remembered for attribution (Apache-2.0).
 import type { FrameBody, ResponseBody } from "../../contracts/session.js";
 import { asRecord, type JsonRecord } from "../json.js";
 import { streamJsonDuplicateInput, streamJsonInitialized, streamJsonInputLifecycle } from "./input-lifecycle.js";
@@ -31,6 +32,12 @@ function withCompactingAgent<S extends StreamJsonProjectionState>(state: S, agen
 }
 
 function rememberToolUses<S extends StreamJsonProjectionState>(state: S, message: JsonRecord, agentPath: readonly string[]): S {
+  // BYOK change: a root tool use's attribution is its own id with no ancestors,
+  // which attributionOf derives without an entry; only tool uses inside an
+  // agent are remembered, so the map does not grow with every root tool call.
+  if (agentPath.length === 0) {
+    return state;
+  }
   const event = asRecord(message.event);
   const partial = event?.type === "content_block_start" ? asRecord(event.content_block) : null;
   const ids = (partial === null ? contentBlocks(message) : [partial])
