@@ -32,7 +32,7 @@ import { createAcpTerminalHost, type SpawnAcpTerminal } from "./terminal.js";
 import { createAcpTurns, type ActiveTurn } from "./turns.js";
 import { acpTakesImages } from "./prompt.js";
 import { createAcpTokenUsage } from "./token-usage.js";
-import { createAcpOpening } from "./opening.js";
+import { createAcpOpening, createAcpPromptAnswers, withAcpPromptAnswers } from "./opening.js";
 import { createAcpConfigUpdates } from "./config-updates.js";
 import type { JsonRecord } from "../json.js";
 import { createAcpNativeTurnTracker } from "./native-turns.js";
@@ -116,7 +116,9 @@ async function openAcpRuntimeSession(
     const opening = createAcpOpening();
     const configUpdates = createAcpConfigUpdates();
     const readiness = profile.openReadiness?.(options);
-    const recorder = createAcpRecorder(usageGate, profile.attributeUpdate, tokenUsage, undefined, profile.projectUpdate, profile.projectExtension, nativeTurns, profile);
+    // BYOK change: a child's own update projects events only when it was read while a prompt awaited its answer (records.ts).
+    const promptAnswers = createAcpPromptAnswers();
+    const recorder = createAcpRecorder(usageGate, profile.attributeUpdate, tokenUsage, undefined, profile.projectUpdate, profile.projectExtension, nativeTurns, { ...profile, whilePromptAwaited: promptAnswers.whilePromptAwaited });
     const client = createAcpClientApp(terminalHost, {
       update: (notification, receivedAt) => {
         recorder.update(notification, receivedAt);
@@ -135,7 +137,7 @@ async function openAcpRuntimeSession(
       extensionNotifications: profile.extensionNotifications ?? [],
       ...(hooks.onPermission === undefined ? {} : { permission: hooks.onPermission }),
     });
-    const runtime = startAcpProcess(spawnLineProcess, installation.command, args, client, { cwd: options.cwd, env: environment, redact: credentials.redact, opening });
+    const runtime = startAcpProcess(spawnLineProcess, installation.command, args, client, { cwd: options.cwd, env: environment, redact: credentials.redact, opening: withAcpPromptAnswers(opening, promptAnswers) });
     const release = async (): Promise<void> => {
       runtime.kill();
       await runtime.exited;
