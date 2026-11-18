@@ -2,7 +2,10 @@
 import { antigravityQuotaError, antigravityQuotaNotice } from "./quota.js";
 import { wholePromptTokenUsage } from "../../shared/acp/token-usage.js";
 import { configureAntigravityModel } from "./model-selection.js";
-import { antigravityEnvironment } from "./environment.js";
+
+// BYOK change: the narrow bridge reads the same declaration as Runtime.sessionCapabilities.
+export const antigravitySessionCapabilities = () => ({ steer: true } as const);
+import { sessionEnvironment } from "../../shared/environment.js";
 import { antigravityStateArgs } from "./state-directory.js";
 import type { SessionOptions } from "../../contracts/session.js";
 import { antigravityRefusedSessionOptions } from "./options.js";
@@ -48,8 +51,7 @@ export function normalizeAntigravityListedCwd(listedCwd: string, platform: NodeJ
 }
 
 export const antigravityAcpProfile: AcpSessionProfile = {
-  args: (options) => antigravityAcpArgs(antigravityEnvironment(options.env)),
-  environment: (options) => antigravityEnvironment(options.env),
+  args: (options) => antigravityAcpArgs(sessionEnvironment(options.env)),
   resumeKeepsSessionCwd: true,
   normalizeListedCwd: normalizeAntigravityListedCwd,
   // Subagent transport attribution remains unverified. A second native
