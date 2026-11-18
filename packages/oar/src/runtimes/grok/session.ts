@@ -32,7 +32,7 @@ export function selectGrokAuthMethod(initialized: JsonRecord): string | undefine
   return ids.includes("cached_token") ? "cached_token" : undefined;
 }
 
-export function grokInitializeMeta(options: SessionOptions): JsonRecord {
+export function grokInitializeMeta(options: Partial<SessionOptions>): JsonRecord {
   return {
     clientIdentifier: "oar",
     clientType: "generic",

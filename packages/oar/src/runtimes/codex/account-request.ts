@@ -1,5 +1,6 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
-import type { SessionOptions } from "../../contracts/session-options.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
 import type { AccountUsageReauthReason, AccountUsageUnsupportedReason } from "../../contracts/account-usage.js";
 import { startAppServerClient, type AppServerClient, type RpcOutcome } from "./app-server-client.js";
 import { asRecord } from "../../shared/json.js";
@@ -9,11 +10,6 @@ export type ReadOutcome =
   | { readonly kind: "reauth_required"; readonly reason: AccountUsageReauthReason }
   | { readonly kind: "unsupported"; readonly reason: AccountUsageUnsupportedReason }
   | { readonly kind: "error"; readonly cause?: unknown };
-
-export type StartAppServerClient = (command: string, env?: SessionOptions["env"]) => AppServerClient;
-
-const startAccountAppServer: StartAppServerClient = (command, env) =>
-  startAppServerClient(command, env, {}, undefined, { shutdown: "stdin" });
 
 /**
  * One account request. `legacyParams` is sent instead when the app-server
@@ -109,43 +105,49 @@ export async function callAppServer(
   command: string,
   timeoutMs: number,
   call: AccountCall,
-  startClient: StartAppServerClient = startAccountAppServer,
-  env?: SessionOptions["env"],
+  options: OwnedReaderOptions,
 ): Promise<ReadOutcome> {
   const state: { inAccountCall: boolean; aborted: boolean; callOutcome?: RpcOutcome } = {
     inAccountCall: false,
     aborted: false,
   };
   try {
-    return await withQueryDeadline("Codex account request", timeoutMs, async (signal, own): Promise<ReadOutcome> => {
-      signal.addEventListener("abort", () => { state.aborted = true; }, { once: true });
-      const client = own(startClient(command, env));
-      await client.request("initialize", {
-        clientInfo: { name: "oar", version: "0.0.0" },
-        capabilities: { experimentalApi: true },
-      });
-      signal.throwIfAborted();
-      client.notify("initialized", {});
-
-      // Read auth mode before the ChatGPT-only account endpoints. In API-key
-      // mode that endpoint rejects with "ChatGPT authentication required" even
-      // though Codex itself is correctly authenticated; treating that as expired
-      // OAuth would tell the user to perform a login that cannot fix the state.
-      let account: unknown = undefined;
+    return await withQueryDeadline("Codex account request", timeoutMs, async (signal): Promise<ReadOutcome> => {
+      const client = startAppServerClient(options.spawn, command, options.env, {}, undefined, { redact: options.redact });
+      client.handle({ onNotification: () => {}, onServerRequest: () => {} });
+      const stop = (): void => { state.aborted = true; client.kill(); };
+      signal.addEventListener("abort", stop, { once: true });
       try {
-        account = await client.request("account/read", {});
-      } catch {
-        // Older app-servers may not expose account/read. Preserve the existing
-        // rate-limit read in that case instead of making identity mandatory.
-      }
-      signal.throwIfAborted();
-      if (isNonSubscriptionAccount(account)) {
-        return { kind: "unsupported", reason: "unsupported_auth_mode" };
-      }
+        await client.request("initialize", {
+          clientInfo: { name: "oar", version: "0.0.0" },
+          capabilities: { experimentalApi: true },
+        });
+        signal.throwIfAborted();
+        client.notify("initialized", {});
 
-      state.inAccountCall = true;
-      const result = await request(client, call, signal, (outcome) => { state.callOutcome = outcome; });
-      return { kind: "ok", result, email: accountEmail(account) };
+        // Read auth mode before the ChatGPT-only account endpoints. In API-key
+        // mode that endpoint rejects with "ChatGPT authentication required" even
+        // though Codex itself is correctly authenticated; treating that as expired
+        // OAuth would tell the user to perform a login that cannot fix the state.
+        let account: unknown = undefined;
+        try {
+          account = await client.request("account/read", {});
+        } catch {
+          // Older app-servers may not expose account/read. Preserve the existing
+          // rate-limit read in that case instead of making identity mandatory.
+        }
+        signal.throwIfAborted();
+        if (isNonSubscriptionAccount(account)) {
+          return { kind: "unsupported", reason: "unsupported_auth_mode" };
+        }
+
+        state.inAccountCall = true;
+        const result = await request(client, call, signal, (outcome) => { state.callOutcome = outcome; });
+        return { kind: "ok", result, email: accountEmail(account) };
+      } finally {
+        signal.removeEventListener("abort", stop);
+        client.kill();
+      }
     });
   } catch (error) {
     if (error instanceof RangeError) { throw error; }

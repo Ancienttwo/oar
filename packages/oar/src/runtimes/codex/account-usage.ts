@@ -1,10 +1,11 @@
-import type { SessionOptions } from "../../contracts/session-options.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 import type {
-  AccountUsageReader,
   AccountUsageSnapshot,
   AccountUsageWindow,
 } from "../../contracts/account-usage.js";
-import { callAppServer, type ReadOutcome, type StartAppServerClient } from "./account-request.js";
+import { callAppServer, type ReadOutcome } from "./account-request.js";
 import { asEpochInstant, asNumber, asRecord } from "../../shared/json.js";
 import { usedRatioFromPercent } from "../../shared/usage-ratio.js";
 import { projectLimitResets } from "./reset-credits.js";
@@ -192,23 +193,22 @@ export function projectCodexUsage(result: unknown, email?: string): AccountUsage
 export async function readFromAppServer(
   command: string,
   timeoutMs: number,
-  startClient?: StartAppServerClient,
-  env?: SessionOptions["env"],
+  options: OwnedReaderOptions,
   limitResetDetails = true,
 ): Promise<ReadOutcome> {
   // Older app-servers take this read with no params and refuse any field;
   // they report no reset credits either, so the bare read loses nothing.
   const params = limitResetDetails ? {} : { excludeResetCreditDetails: true };
-  const outcome = await callAppServer(command, timeoutMs, { method: "account/rateLimits/read", params, legacyParams: {} }, startClient, env);
+  const outcome = await callAppServer(command, timeoutMs, { method: "account/rateLimits/read", params, legacyParams: {} }, options);
   return outcome;
 }
 
 
-export const codexAccountUsage: AccountUsageReader = async (installation, options = {}) => {
+export async function codexAccountUsage(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "unsupported_installation" };
   }
-  const outcome = await readFromAppServer(installation.command, options.timeoutMs ?? 8000, undefined, options.env, options.limitResetDetails ?? true);
+  const outcome = await readFromAppServer(installation.command, options.timeoutMs, options);
   switch (outcome.kind) {
     case "ok":
       return projectCodexUsage(outcome.result, outcome.email);
@@ -221,4 +221,4 @@ export const codexAccountUsage: AccountUsageReader = async (installation, option
     default:
       throw new Error("Failed to read Codex account usage");
   }
-};
+}

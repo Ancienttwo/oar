@@ -1,11 +1,11 @@
-import { withQueryDeadline } from "../../shared/executable/query.js";
-import type { ListModelsResult, ModelEntry, ModelLister } from "../../contracts/list-models.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { effortLevelsOf } from "../../shared/effort-levels.js";
 import { asRecord, asRecordList, type JsonRecord } from "../../shared/json.js";
-import { listingCwd } from "../../shared/listing-cwd.js";
-import { DSH_READY_TIMEOUT_MS, DshCommandError, dshControl } from "./control.js";
-import { dshEnvironment, launchDsh } from "./launch.js";
-import { readExecutableVersion } from "../../shared/executable/index.js";
+import { DshCommandError, dshControl } from "./control.js";
+import { launchDsh, type DshLaunch } from "./launch.js";
 import { dshVersionUnsupported } from "./version.js";
 
 /** The native catalog as `Session.model` selectors. A provider that could not list is not a model; the caller decides what no model means. */
@@ -58,26 +58,22 @@ export function dshCatalogResult(catalog: JsonRecord): ListModelsResult {
 }
 
 /** Native `llm.listProviders`, `listModels` and `resolveModelInfo`, in a short-lived process started the way a session is. */
-export const dshListModels: ModelLister = async (installation, options = {}) => {
+export async function dshListModels(installation: AvailableInstallation, options: OwnedReaderOptions, launch: DshLaunch): Promise<ListModelsResult> {
   if (installation.via !== "executable") { return { kind: "unsupported", reason: "DSH model listing requires its executable" }; }
-  const timeoutMs = options.timeoutMs ?? DSH_READY_TIMEOUT_MS;
-  const result = await withQueryDeadline<ListModelsResult>("DSH model listing", timeoutMs, async (signal, own) => {
-    const env = dshEnvironment(options.env);
-    const version = installation.version ?? await readExecutableVersion(installation.command, options.timeoutMs ?? 15_000, undefined, env, signal);
-    signal.throwIfAborted();
-    const refusal = dshVersionUnsupported(version);
-    if (refusal !== null) { return refusal; }
-    const launched = await launchDsh(installation.command, listingCwd(options), env, { signal });
-    own(launched.child);
-    const control = dshControl(launched.child, () => {});
-    try {
-      await control.ready;
-      const catalog = await control.request("models", {}, options.timeoutMs);
-      return dshCatalogResult(catalog);
-    } catch (error) {
-      if (error instanceof DshCommandError && error.code === "native_method_unavailable") { return { kind: "unsupported", reason: error.message }; }
-      throw error;
-    }
-  });
-  return result;
-};
+  const refusal = dshVersionUnsupported(installation.version);
+  if (refusal !== null) { return refusal; }
+  const { child, profileReady } = await launchDsh(options.spawn, installation.command, launch);
+  const control = dshControl(child, () => {});
+  try {
+    await control.ready;
+    profileReady();
+    const catalog = await control.request("models", {}, options.timeoutMs);
+    return dshCatalogResult(catalog);
+  } catch (error) {
+    if (error instanceof DshCommandError && error.code === "native_method_unavailable") { return { kind: "unsupported", reason: error.message }; }
+    throw error;
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+}
