@@ -41,7 +41,7 @@ test.each([
   { name: "the agent applies another level", mode: "session", effort: "sticky", message: "session/set_config_option left fixture_effort at medium although effort sticky was requested" },
   { name: "the agent offers no thought_level option", mode: "no-thought-level", effort: "high", message: "session/new advertises no thought_level config option, so effort high cannot be applied" },
 ])("the open is refused when $name", async ({ mode, effort, message }) => {
-  await expect(start({ args: [fixture, mode] }, undefined, undefined, effort)).rejects.toThrow(message);
+  await expect(start({ args: [fixture, mode] }, undefined, undefined, effort)).rejects.toMatchObject({ name: "UnsupportedOptionError", option: "effort", message });
 });
 
 test("acpThoughtLevelOption finds the effort selector by category, whatever its id", () => {
