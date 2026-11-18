@@ -163,7 +163,7 @@ async function openAcpRuntimeSession(
     const capabilities = { ...profile.capabilities, images: profile.capabilities.images ?? acpTakesImages(opened.initialized) };
     let compaction: ReturnType<typeof manualCompaction> | null = null;
     const promptUsage = (response: JsonRecord): RuntimeEventBody | null => tokenUsage.prompt(response, opened.initialized);
-    const turns = createAcpTurns({ operationBusy: () => compaction?.busy() === true, kernel, runtime, profile, usageGate, capabilities, promptMeta: profile.promptMeta?.(options), promptUsage,
+    const turns = createAcpTurns({ operationBusy: () => compaction?.busy() === true, kernel, runtime, profile, usageGate, capabilities, protectImage: credentials.addImage, promptMeta: profile.promptMeta?.(options), promptUsage,
       ...(nativeTurns === undefined ? {} : { native: { promptParams: (inputId: string | undefined): JsonRecord => ({ _meta: nativeTurns.name(inputId) }), afterClose: nativeTurns.afterOarTurn } }),
     });
     // The runtime's own turn is the active turn: prompt is busy, held input waits, steer and abort reach it.
@@ -243,7 +243,7 @@ async function openAcpRuntimeSession(
           // The turn running now, OAR's or the runtime's own, must still be the one running when the RPC goes out.
           const target = turns.active();
           if (target === null) { return { kind: "rejected", code: "no_active_turn", reason: "not_steerable: no active turn" }; }
-          if (steerRequest !== undefined) { return sendAcpSteerRequest({ kernel, runtime, profile, capabilities, running: () => turns.active() === target && !target.abortRequested }, request, input, inputOptions); }
+          if (steerRequest !== undefined) { return sendAcpSteerRequest({ kernel, runtime, profile, capabilities, protectImage: credentials.addImage, running: () => turns.active() === target && !target.abortRequested }, request, input, inputOptions); }
           return steerParams === undefined
             ? { kind: "rejected", code: "no_active_turn", reason: "not_steerable: no active turn" }
             : turns.steer(target, input, inputOptions, steerParams(input));
