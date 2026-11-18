@@ -1,5 +1,6 @@
 /* oxlint-disable typescript/promise-function-async -- Request callbacks return the ACP SDK promise directly. */
 import { client as createClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
 import { startAcpProcess, withAcpDeadline, type AcpProcess } from "../../shared/acp/process.js";
 import { withQueryDeadline } from "../../shared/executable/query.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
@@ -20,8 +21,10 @@ export function signedOutEmail(info: JsonRecord | null): string | undefined {
   return method === null || method === undefined ? grokAccountEmail(info) : undefined;
 }
 
-export function startGrokReader(command: string, env: NodeJS.ProcessEnv): AcpProcess {
-  return startAcpProcess(command, ["agent", "--always-approve", "--no-leader", "stdio"], createClient({ name: "oar" }), { env });
+export function startGrokReader(command: string, options: OwnedReaderOptions): AcpProcess {
+  return startAcpProcess(options.spawn, command, ["agent", "--always-approve", "--no-leader", "stdio"], createClient({ name: "oar" }), {
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }), env: options.env, redact: options.redact,
+  });
 }
 
 export async function initializeGrokReader(runtime: AcpProcess, timeoutMs: number): Promise<JsonRecord> {
@@ -30,7 +33,7 @@ export async function initializeGrokReader(runtime: AcpProcess, timeoutMs: numbe
     protocolVersion: PROTOCOL_VERSION,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     clientInfo: { name: "oar", version: "0.0.0" },
-    _meta: grokInitializeMeta({ cwd: process.cwd() }),
+    _meta: grokInitializeMeta({}),
   }, options));
   return asRecord(response) ?? {};
 }
@@ -43,11 +46,11 @@ export async function readGrokAccountInfo(runtime: AcpProcess, timeoutMs: number
 }
 
 /** Read only the identity Grok still reports without an active sign-in. Never request authentication here. */
-export async function previousGrokEmail(command: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string | null> {
+export async function previousGrokEmail(command: string, options: OwnedReaderOptions, timeoutMs: number): Promise<string | null> {
   if (timeoutMs <= 0) { return null; }
   try {
     return await withQueryDeadline<string | null>("Grok previous account", timeoutMs, async (signal, own) => {
-      const runtime = own(startGrokReader(command, env));
+      const runtime = own(startGrokReader(command, options));
       await initializeGrokReader(runtime, timeoutMs);
       signal.throwIfAborted();
       const info = await readGrokAccountInfo(runtime, timeoutMs);

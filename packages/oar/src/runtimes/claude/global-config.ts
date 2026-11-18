@@ -1,6 +1,5 @@
 import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { environmentValue } from "../../shared/environment.js";
 
@@ -9,7 +8,8 @@ export async function readClaudeConfigField(env: NodeJS.ProcessEnv, field: "oaut
   const home = environmentValue(env, process.platform === "win32" ? "USERPROFILE" : "HOME");
   const config = environmentValue(env, "CLAUDE_CONFIG_DIR");
   const directory = config === undefined || config === "" ? home : config;
-  const filePath = path.join(directory === undefined || directory === "" ? homedir() : directory, ".claude.json");
+  if (directory === undefined || directory === "") { return undefined; }
+  const filePath = path.join(directory, ".claude.json");
   try {
     const entry = await stat(filePath);
     if (!entry.isFile()) { return undefined; }
