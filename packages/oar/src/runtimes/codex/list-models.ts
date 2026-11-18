@@ -1,4 +1,7 @@
-import type { ModelEntry, ModelLister } from "../../contracts/list-models.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { effortLevelsOf } from "../../shared/effort-levels.js";
 import { asRecord, asRecordList } from "../../shared/json.js";
 import { listingCwd } from "../../shared/listing-cwd.js";
@@ -69,7 +72,7 @@ export function codexDefaultModel(models: readonly ModelEntry[], configured: str
   });
 }
 
-export const codexListModels: ModelLister = async (installation, options = {}) => {
+export async function codexListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "codex model listing requires the codex executable" };
   }
@@ -77,7 +80,7 @@ export const codexListModels: ModelLister = async (installation, options = {}) =
   // resolves a relative CODEX_HOME); the project is the `config/read` cwd, as
   // it is the thread's cwd in a session.
   const cwd = listingCwd(options);
-  const client = startAppServerClient(installation.command, options.env);
+  const client = startAppServerClient(options.spawn, installation.command, options.env, {}, undefined, { redact: options.redact });
   const timeoutMs = options.timeoutMs ?? 15_000;
   const deadline = { timedOut: false };
   const timer = setTimeout(() => { deadline.timedOut = true; client.kill(); }, timeoutMs);
@@ -106,4 +109,4 @@ export const codexListModels: ModelLister = async (installation, options = {}) =
     client.kill();
     await client.exited;
   }
-};
+}

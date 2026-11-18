@@ -1,8 +1,9 @@
-import type { SessionOptions } from "../../contracts/session-options.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 import { randomUUID } from "node:crypto";
-import type { ModelEntry, ModelLister } from "../../contracts/list-models.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { effortLevelsOf } from "../../shared/effort-levels.js";
-import { spawnLineProcess } from "../../shared/executable/index.js";
 import { asRecord, asRecordList, parseJson, type JsonRecord } from "../../shared/json.js";
 import { listingCwd } from "../../shared/listing-cwd.js";
 import { claudeEnv } from "./environment.js";
@@ -72,8 +73,8 @@ function controlError(inner: JsonRecord): string {
  * and the answer is the same models, faster). User settings stay loaded —
  * provider env and apiKeyHelper live there — so authentication is unaffected.
  */
-async function readListModels(command: string, cwd: string, timeoutMs: number, env: SessionOptions["env"]): Promise<ReadOutcome> {
-  const child = spawnLineProcess(command, [
+async function readListModels(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
+  const child = options.spawn(command, [
     "-p",
     "--input-format", "stream-json",
     "--output-format", "stream-json",
@@ -81,7 +82,7 @@ async function readListModels(command: string, cwd: string, timeoutMs: number, e
     "--settings", "{\"disableAllHooks\":true}",
     "--strict-mcp-config",
     "--mcp-config", "{\"mcpServers\":{}}",
-  ], { cwd, env: claudeEnv(env), killTree: true });
+  ], { cwd: listingCwd(options), env: claudeEnv(options.env) });
   const requestId = `oar-list-models-${randomUUID()}`;
   const { promise: answered, resolve } = Promise.withResolvers<JsonRecord | null>();
   child.onLine((line) => {
@@ -99,7 +100,7 @@ async function readListModels(command: string, cwd: string, timeoutMs: number, e
   });
   const timer = setTimeout(() => {
     child.kill();
-  }, timeoutMs);
+  }, options.timeoutMs);
   try {
     await child.spawned;
     child.write(`${JSON.stringify({
@@ -107,7 +108,7 @@ async function readListModels(command: string, cwd: string, timeoutMs: number, e
       request_id: requestId,
       request: { subtype: "list_models" },
     })}\n`);
-    const inner = await answered;
+    const inner = await Promise.race([answered, child.exited.then(() => null)]);
     if (inner === null) {
       return { kind: "error", detail: "claude exited before answering list_models" };
     }
@@ -126,19 +127,19 @@ async function readListModels(command: string, cwd: string, timeoutMs: number, e
   }
 }
 
-async function readOutcome(command: string, cwd: string, timeoutMs: number, env: SessionOptions["env"]): Promise<ReadOutcome> {
+async function readOutcome(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
   try {
-    return await readListModels(command, cwd, timeoutMs, env);
+    return await readListModels(command, options);
   } catch (error) {
     throw new Error("Failed to list Claude models", { cause: error });
   }
 }
 
-export const claudeListModels: ModelLister = async (installation, options = {}) => {
+export async function claudeListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "claude model listing requires the claude executable" };
   }
-  const outcome = await readOutcome(installation.command, listingCwd(options), options.timeoutMs ?? 15_000, options.env);
+  const outcome = await readOutcome(installation.command, options);
   if (outcome.kind === "ok") {
     return { kind: "ok", models: projectClaudeModels(outcome.payload) };
   }
@@ -146,4 +147,4 @@ export const claudeListModels: ModelLister = async (installation, options = {}) 
     return { kind: "unauthenticated", detail: outcome.detail };
   }
   throw new Error(`Failed to list Claude models: ${outcome.detail}`);
-};
+}

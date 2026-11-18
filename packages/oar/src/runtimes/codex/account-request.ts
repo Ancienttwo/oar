@@ -1,5 +1,6 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
-import type { SessionOptions } from "../../contracts/session-options.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
 import type { AccountUsageReauthReason, AccountUsageUnsupportedReason } from "../../contracts/account-usage.js";
 import { startAppServerClient, type AppServerClient } from "./app-server-client.js";
 import { asRecord } from "../../shared/json.js";
@@ -9,8 +10,6 @@ export type ReadOutcome =
   | { readonly kind: "reauth_required"; readonly reason: AccountUsageReauthReason }
   | { readonly kind: "unsupported"; readonly reason: AccountUsageUnsupportedReason }
   | { readonly kind: "error" };
-
-export type StartAppServerClient = (command: string, env?: SessionOptions["env"]) => AppServerClient;
 
 /**
  * One account request. `legacyParams` is sent instead when the app-server
@@ -73,12 +72,12 @@ export async function callAppServer(
   command: string,
   timeoutMs: number,
   call: AccountCall,
-  startClient: StartAppServerClient = startAppServerClient,
-  env?: SessionOptions["env"],
+  options: OwnedReaderOptions,
 ): Promise<ReadOutcome> {
   try {
     return await withQueryDeadline("Codex account request", timeoutMs, async (signal): Promise<ReadOutcome> => {
-      const client = startClient(command, env);
+      const client = startAppServerClient(options.spawn, command, options.env, {}, undefined, { redact: options.redact });
+      client.handle({ onNotification: () => {}, onServerRequest: () => {} });
       const stop = (): void => { client.kill(); };
       signal.addEventListener("abort", stop, { once: true });
       try {
