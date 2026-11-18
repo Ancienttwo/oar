@@ -5,6 +5,7 @@ import { asRecord, asRecordList, type JsonRecord } from "../json.js";
 import { acpReportedEffort, acpThoughtLevelOption } from "./model.js";
 import { type AcpProcess, withAcpDeadline } from "./process.js";
 import type { AcpConfigUpdates } from "./config-updates.js";
+import { acpOpenFailure, rpcErrorCode } from "./failure.js";
 
 type ObserveStep = (step: { readonly method: string; readonly response: JsonRecord }) => void;
 
@@ -95,12 +96,18 @@ export async function applyAcpEffort(
   } catch (error) {
     // The opener adds the owned child's exit diagnostics to transport failures.
     if (error instanceof AcpError) { throw error; }
-    throw new Error(`${method} ${configId}=${effort} was refused: ${rpcErrorText(error)}`, { cause: error });
+    if (error instanceof UnsupportedOptionError) {
+      throw new UnsupportedOptionError("effort", `${method} ${configId}=${effort} was refused: ${error.message}`);
+    }
+    if (rpcErrorCode(error) === null) { throw error; }
+    const classified = acpOpenFailure(error, "open");
+    if (classified !== error) { throw classified; }
+    throw new UnsupportedOptionError("effort", `${method} ${configId}=${effort} was refused: ${rpcErrorText(error)}`);
   }
   const response = reportedOptions(result, configId, effort) ?? {};
   const applied = acpReportedEffort(response);
   if (applied !== effort) {
-    throw new Error(`${method} left ${configId} at ${applied ?? "an unreported value"} although effort ${effort} was requested`);
+    throw new UnsupportedOptionError("effort", `${method} left ${configId} at ${applied ?? "an unreported value"} although effort ${effort} was requested`);
   }
   return response;
 }
