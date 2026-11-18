@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { sessionEnvironment } from "../../shared/environment.js";
 
 /**
@@ -39,6 +40,6 @@ export function claudeSessionEnv(env: Readonly<Record<string, string | null>> | 
 }
 
 /** The environment for the claude subcommands OAR runs (auth, usage, model list, inventory): the caller overlay, with the same parent-session marker policy as sessions. */
-export function claudeEnv(overlay?: Readonly<Record<string, string | null>>): NodeJS.ProcessEnv {
-  return sessionEnvironment(claudeSessionEnv(overlay));
+export function claudeEnv(env: Readonly<Record<string, string>>): Record<string, string> {
+  return sessionEnvironment(claudeSessionEnv(env), {}) as Record<string, string>;
 }
