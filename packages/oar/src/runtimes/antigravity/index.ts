@@ -1,3 +1,4 @@
+import { antigravitySessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -11,7 +12,7 @@ import { ANTIGRAVITY_MINIMUM_VERSION } from "./version.js";
 export const antigravityRuntime = defineRuntime({
   id: "antigravity",
   // minVersion 1.5.0: also the oldest version observed advertising mcpCapabilities.http (with --process-per-session) and tested in mcp-servers-acp.vendor.test.ts.
-  sessionCapabilities: () => ({ steer: true, contextUsage: { tokens: true, contextWindow: true }, mcpTransports: ["stdio", "http"], stopTask: false }),
+  sessionCapabilities: () => ({ ...antigravitySessionCapabilities(), contextUsage: { tokens: true, contextWindow: true }, mcpTransports: ["stdio", "http"], stopTask: false }),
   minVersion: ANTIGRAVITY_MINIMUM_VERSION,
   manualCompaction: { kind: "unsupported", reason: "The CLI advertises /compact, but no structured completion and attribution contract has been verified." },
   brand: runtimeBrands.antigravity, verifiedPlatforms: verifiedPlatforms.antigravity,

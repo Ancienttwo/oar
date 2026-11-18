@@ -1,3 +1,4 @@
+import { dshSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -14,6 +15,7 @@ export const dshRuntime = defineRuntime({
     const version = installation.via === "executable" ? installation.version : undefined;
     const nativeSessionFile = dshSupportsNativeSessionFile(version);
     return {
+      ...dshSessionCapabilities(),
       ...(nativeSessionFile === undefined ? {} : { nativeSessionFile }),
       compactionEvents: { started: true, ended: true },
       contextUsage: { tokens: true, contextWindow: true },
