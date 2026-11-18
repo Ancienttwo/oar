@@ -1,3 +1,4 @@
+import { claudeSessionCapabilities } from "../../shared/stream-json/session.js";
 import { claudeRefusedSessionOptions } from "./options.js";
 /* oxlint-disable import/max-dependencies -- The runtime declaration imports one module per capability. */
 import { runtimeBrands } from "../../brands.js";
@@ -17,7 +18,7 @@ import { claudeSession } from "./session.js";
 
 export const claudeRuntime = defineRuntime({
   id: "claude",
-  sessionCapabilities: () => ({ steer: true, images: true, contextUsage: { tokens: true, contextWindow: true }, mcpTransports: ["stdio", "http"], stopTask: true }),
+  sessionCapabilities: () => ({ ...claudeSessionCapabilities(), contextUsage: { tokens: true, contextWindow: true }, mcpTransports: ["stdio", "http"], stopTask: true }),
   manualCompaction: { kind: "supported", activeTurn: "reject" },
   refusedSessionOptions: claudeRefusedSessionOptions,
   resumedSessionOptions: {

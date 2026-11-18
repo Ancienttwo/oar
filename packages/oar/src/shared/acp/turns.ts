@@ -79,12 +79,17 @@ export function createAcpTurns(deps: {
   readonly capabilities: Pick<SessionCapabilities, "images">;
   readonly promptMeta?: JsonRecord | undefined;
   readonly promptUsage: (response: JsonRecord) => RuntimeEventBody | null;
+  readonly protectImage: (data: string) => void;
   readonly fallback?: (request: RequestRecord) => Promise<void>;
   readonly operationBusy?: () => boolean;
   /** Native turns (`nativeTurns`): params naming a prompt from its input id, and what a closing turn hands on (native-turns.ts). */ readonly native?: { readonly promptParams: (inputId: string | undefined) => JsonRecord; readonly afterClose: () => readonly RuntimeEventBody[] } | undefined;
 }): AcpTurns {
   const { kernel, runtime, profile, usageGate, capabilities, promptUsage, promptMeta } = deps;
   const rootId = kernel.sessionId;
+  const protectedPrompt: typeof acpPrompt = (input, images) => {
+    for (const image of images ?? []) deps.protectImage(image.data);
+    return acpPrompt(input, images);
+  };
   const held: { readonly inputId: string | undefined; readonly input: string; readonly images: readonly InputImage[] | undefined; readonly request: RequestRecord; readonly prompt: JsonRecord[]; accepted: boolean }[] = [];
   let dispatching = false;
   let spawned = false;
@@ -231,7 +236,7 @@ export function createAcpTurns(deps: {
     return state;
   };
   const begin = (request: RequestRecord | null, input: string, images?: readonly InputImage[]): ResponseBody =>
-    inputBytesRefusal(profile.maxInputBytes, input) ?? withInputImages(capabilities, images, (loaded) => open(request, acpPrompt(input, loaded)));
+    inputBytesRefusal(profile.maxInputBytes, input) ?? withInputImages(capabilities, images, (loaded) => open(request, protectedPrompt(input, loaded)));
   function drainHeld(): void {
     // Held input is dropped once the stream says the runtime is unreachable
     // (an `exited` response or a `dispose` request), not by an adapter flag.
@@ -271,7 +276,7 @@ export function createAcpTurns(deps: {
       // oxlint-disable-next-line typescript/promise-function-async -- Return the dispatch receipt promise without another async wrapper.
       return inputBytesRefusal(profile.maxInputBytes, input) ?? withInputImages(capabilities, options?.images, (loaded) => {
         const admission = Promise.withResolvers<ResponseBody>();
-        startVendorPrompt(state, acpPrompt(input, loaded), extraParams, { inputId: options?.inputId, respond: admission.resolve });
+        startVendorPrompt(state, protectedPrompt(input, loaded), extraParams, { inputId: options?.inputId, respond: admission.resolve });
         return admission.promise;
       });
     },
@@ -349,7 +354,7 @@ export function createAcpTurns(deps: {
         return gone();
       }
       return inputBytesRefusal(profile.maxInputBytes, input) ?? withInputImages(capabilities, images, (loaded) => {
-        enqueueHeld(held, { inputId, input, images, request, prompt: acpPrompt(input, loaded), accepted: false });
+        enqueueHeld(held, { inputId, input, images, request, prompt: protectedPrompt(input, loaded), accepted: false });
         return { kind: "accepted", queued: "adapter" };
       });
     },

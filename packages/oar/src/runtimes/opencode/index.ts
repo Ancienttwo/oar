@@ -1,3 +1,4 @@
+import { opencodeSessionCapabilities } from "./version.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -6,12 +7,13 @@ import { opencodeUpgrade } from "./upgrade.js";
 import { opencodeInstallation } from "./installation.js";
 import { opencodeInstall, opencodeInstallLines, opencodeInstallPlan } from "./install.js";
 import { opencodeListModels } from "./list-models.js";
-import { opencodeRefusedSessionOptions, opencodeSessionCapabilities } from "./options.js";
+import { opencodeRefusedSessionOptions, opencodeSessionCapabilities as opencodeInstallationCapabilities } from "./options.js";
 import { opencodeSharedRefusal } from "./sharing-admission.js";
 
 export const opencodeRuntime = defineRuntime({
   id: "opencode",
-  sessionCapabilities: opencodeSessionCapabilities,
+  // v1 always steers; v2 steers only when initialize advertises it. Images come from initialize.
+  sessionCapabilities: (installation) => ({ ...opencodeInstallationCapabilities(installation), ...opencodeSessionCapabilities(installation) }),
   brand: runtimeBrands.opencode, verifiedPlatforms: verifiedPlatforms.opencode,
   refusedSessionOptions: opencodeRefusedSessionOptions,
   mcpToolsListChanged: "full",

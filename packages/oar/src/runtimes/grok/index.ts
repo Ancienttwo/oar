@@ -1,3 +1,4 @@
+import { grokSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { grokSkills, grokMcpServers } from "./inventory.js";
@@ -7,11 +8,11 @@ import { grokInstallation } from "./installation.js";
 import { grokInstall, grokInstallPlan } from "./install.js";
 import { grokCheckUpdate, grokUpgrade } from "./update.js";
 import { grokSharedRefusal } from "./sharing-admission.js";
-import { grokRefusedSessionOptions, grokSessionCapabilities } from "./options.js";
+import { grokRefusedSessionOptions, grokSessionCapabilities as grokInstallationCapabilities } from "./options.js";
 
 export const grokRuntime = defineRuntime({
   id: "grok",
-  sessionCapabilities: grokSessionCapabilities,
+  sessionCapabilities: (installation) => ({ ...grokInstallationCapabilities(installation), ...grokSessionCapabilities() }),
   brand: runtimeBrands.grok, verifiedPlatforms: verifiedPlatforms.grok,
   manualCompaction: { kind: "supported", activeTurn: "reject" },
   refusedSessionOptions: grokRefusedSessionOptions,
