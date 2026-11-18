@@ -1,4 +1,5 @@
 /* oxlint-disable import/max-dependencies -- The runtime declaration imports one module per capability. */
+import { codexSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { codexSkills, codexMcpServers, codexTools } from "./inventory.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -15,7 +16,7 @@ import { codexSession } from "./session.js";
 
 export const codexRuntime = defineRuntime({
   id: "codex",
-  sessionCapabilities: () => ({ steer: true, images: true }),
+  sessionCapabilities: codexSessionCapabilities,
   manualCompaction: { kind: "supported", activeTurn: "reject" },
   refusedSessionOptions: codexRefusedSessionOptions,
   resumedSessionOptions: {
