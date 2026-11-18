@@ -1,7 +1,8 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { antigravityUsesDefaultState } from "./state-directory.js";
-import type { AccountUsageReader, AccountUsageSnapshot, AccountUsageWindow } from "../../contracts/account-usage.js";
-import { sessionEnvironment } from "../../shared/environment.js";
-import { runExecutable } from "../../shared/executable/index.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { AccountUsageSnapshot, AccountUsageWindow } from "../../contracts/account-usage.js";
 import { withQueryDeadline } from "../../shared/executable/query.js";
 import { remainingMs } from "../../shared/deadline.js";
 import { utcInstantFromDate } from "../../shared/instant.js";
@@ -117,17 +118,17 @@ export function projectAntigravityUsage(
   };
 }
 
-/** Quota through agy's own `/usage` answer, after its login check; no HTTP call of OAR's. */
-export const antigravityAccountUsage: AccountUsageReader = async (installation, options = {}) => {
+/** Quota through agy's own `/usage` answer, after its login check; no credential read, no HTTP call of OAR's. */
+export async function antigravityAccountUsage(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "unsupported_installation" };
   }
-  const env = sessionEnvironment(options.env);
+  const { env } = options;
   if (!antigravityUsesDefaultState(env)) { return { kind: "unsupported", reason: "unsupported_auth_storage" }; }
   const timeoutMs = options.timeoutMs ?? 30_000;
   const deadline = Date.now() + timeoutMs;
   const snapshot = await withQueryDeadline<AccountUsageSnapshot>(USAGE, timeoutMs, async (signal) => {
-    const status = await readAntigravityAuthStatus(installation, { ...(options.env === undefined ? {} : { env: options.env }), timeoutMs: remainingMs(deadline, USAGE), includeAccount: true, signal });
+    const status = await readAntigravityAuthStatus(installation, { ...options, timeoutMs: remainingMs(deadline, USAGE), signal });
     if (status.kind === "unknown" && status.code === "version_unsupported") {
       return { kind: "unsupported", reason: "version_unsupported",
         ...(status.installedVersion === undefined ? {} : { installedVersion: status.installedVersion }),
@@ -140,7 +141,7 @@ export const antigravityAccountUsage: AccountUsageReader = async (installation, 
     if (status.kind !== "logged_in") {
       throw new Error(`${USAGE}: agy models did not confirm a login`);
     }
-    const result = await runExecutable(installation.command, ["-p", "/usage", "--output-format", "json"], {
+    const result = await options.run(installation.command, ["-p", "/usage", "--output-format", "json"], {
       env, timeoutMs: remainingMs(deadline, USAGE), signal,
     });
     const reply = parseJson(result.stdout.trim());
@@ -149,11 +150,11 @@ export const antigravityAccountUsage: AccountUsageReader = async (installation, 
     }
     // Credits matter only when no group has quota left; read them then.
     if (!readUsage(reply).everyGroupExhausted) { return projectAntigravityUsage(reply, undefined, status.account); }
-    const credits = await runExecutable(installation.command, ["-p", "/credits", "--output-format", "json"], {
+    const credits = await options.run(installation.command, ["-p", "/credits", "--output-format", "json"], {
       env, timeoutMs: remainingMs(deadline, USAGE), signal,
     });
     const creditsReply = parseJson(credits.stdout.trim());
     return projectAntigravityUsage(reply, projectAntigravityCredits(creditsReply), status.account);
   });
   return snapshot;
-};
+}
