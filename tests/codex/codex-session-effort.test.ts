@@ -146,10 +146,11 @@ test.each([
 );
 
 test("codexResumeEffortRefusal refuses a resume codex never confirms", () => {
-  expect(codexResumeEffortRefusal("low", null, { threadSettings: { effort: "low" } })).toBeNull();
-  expect(codexResumeEffortRefusal("low", null, null)).toBe(
-    "codex reported no thread/settings/updated within 10000 ms, so effort low cannot be confirmed",
-  );
+  expect(codexResumeEffortRefusal("low", { threadSettings: { effort: "low" } })).toBeNull();
+  expect(codexResumeEffortRefusal("low", { threadSettings: { effort: "medium" } })).toMatchObject({ name: "UnsupportedOptionError", option: "effort" });
+  expect(codexResumeEffortRefusal("low", null)).toMatchObject({
+    name: "Error", message: "codex reported no thread/settings/updated within 10000 ms, so effort low cannot be confirmed",
+  });
 });
 
 test("thread/settings/updated is codex's own report of the model and effort a settings change set", () => {
