@@ -1,10 +1,11 @@
-import type { ModelEntry, ModelLister } from "../../contracts/list-models.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { effortLevelsOf } from "../../shared/effort-levels.js";
 import { asRecord, asRecordList, type JsonRecord } from "../../shared/json.js";
-import { listingCwd } from "../../shared/listing-cwd.js";
 import { DshCommandError, dshControl } from "./control.js";
-import { dshEnvironment, launchDsh } from "./launch.js";
-import { readExecutableVersion } from "../../shared/executable/index.js";
+import { launchDsh, type DshLaunch } from "./launch.js";
 import { dshVersionUnsupported } from "./version.js";
 
 /** The native catalog as `Session.model` selectors. A provider that could not list is not a model; the caller decides what no model means. */
@@ -30,13 +31,11 @@ export function projectDshModels(catalog: JsonRecord): readonly ModelEntry[] {
 }
 
 /** Native `llm.listProviders`, `listModels` and `resolveModelInfo`, in a short-lived process started the way a session is. */
-export const dshListModels: ModelLister = async (installation, options = {}) => {
+export async function dshListModels(installation: AvailableInstallation, options: OwnedReaderOptions, launch: DshLaunch): Promise<ListModelsResult> {
   if (installation.via !== "executable") { return { kind: "unsupported", reason: "DSH model listing requires its executable" }; }
-  const env = dshEnvironment(options.env);
-  const version = installation.version ?? await readExecutableVersion(installation.command, options.timeoutMs ?? 15_000, undefined, env);
-  const refusal = dshVersionUnsupported(version);
+  const refusal = dshVersionUnsupported(installation.version);
   if (refusal !== null) { return refusal; }
-  const { child } = await launchDsh(installation.command, listingCwd(options), env);
+  const child = await launchDsh(options.spawn, installation.command, launch);
   const control = dshControl(child, () => {});
   try {
     await control.ready;
@@ -54,4 +53,4 @@ export const dshListModels: ModelLister = async (installation, options = {}) => 
     child.kill();
     await child.exited;
   }
-};
+}

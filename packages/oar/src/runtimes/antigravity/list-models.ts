@@ -1,4 +1,6 @@
-import { sessionEnvironment } from "../../shared/environment.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 /* oxlint-disable typescript/promise-function-async -- Deadline callbacks deliberately return the SDK's native promises. */
 import {
   client as createClient,
@@ -6,7 +8,7 @@ import {
   PROTOCOL_VERSION,
   RequestError,
 } from "@agentclientprotocol/sdk";
-import type { ModelEntry, ModelLister } from "../../contracts/list-models.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { startAcpProcess, withAcpDeadline } from "../../shared/acp/process.js";
 import { hasAcpCapability } from "../../shared/acp/profile.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
@@ -17,8 +19,8 @@ import { projectAntigravityModels, readAntigravityModelMenus } from "./model-men
 
 export { projectAntigravityModels } from "./model-menus.js";
 
-async function readNewSession(command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<ModelEntry[] | undefined> {
-  const runtime = startAcpProcess(command, antigravityAcpArgs(env), createClient({ name: "oar" }), { cwd, env });
+async function readNewSession(command: string, cwd: string, timeoutMs: number, options: OwnedReaderOptions): Promise<ModelEntry[] | undefined> {
+  const runtime = startAcpProcess(options.spawn, command, antigravityAcpArgs(options.env), createClient({ name: "oar" }), { cwd, env: options.env, redact: options.redact });
   try {
     const initialize = methods.agent.initialize;
     const initialized = asRecord(await withAcpDeadline(
@@ -66,16 +68,14 @@ async function readNewSession(command: string, cwd: string, timeoutMs: number, e
   }
 }
 
-export const antigravityListModels: ModelLister = async (installation, options = {}) => {
+export async function antigravityListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "antigravity model listing requires the agy CLI executable" };
   }
   try {
-    const env = sessionEnvironment(options.env);
-    const timeoutMs = options.timeoutMs ?? 30_000;
-    const version = await antigravityVersionPreflight(installation, env, { timeoutMs });
+    const version = await antigravityVersionPreflight(installation, options);
     if (version.kind === "unsupported") { return version; }
-    const models = await readNewSession(installation.command, listingCwd(options), version.timeoutMs, env);
+    const models = await readNewSession(installation.command, listingCwd(options), version.timeoutMs, options);
     if (models === undefined) {
       return { kind: "unsupported", reason: "this agy CLI build returns no model config option on session/new" };
     }
@@ -86,4 +86,4 @@ export const antigravityListModels: ModelLister = async (installation, options =
     }
     throw new Error("Failed to list Antigravity models", { cause: error });
   }
-};
+}
