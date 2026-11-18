@@ -1,4 +1,5 @@
 /* oxlint-disable import/max-dependencies -- The runtime declaration imports one module per capability. */
+import { codexSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { codexSkills, codexMcpServers, codexTools } from "./inventory.js";
@@ -22,7 +23,7 @@ export const codexRuntime = defineRuntime({
     ...(installation.via === "executable" && semverAtLeast(installation.version, "0.158.0") ? { taskEventTypes: ["agent"] } : {}),
     ...(installation.via === "executable" && semverAtLeast(installation.version, "0.169.0") ? { subagentResults: { background: "child_text" } } : {}),
     refusedSessionOptions: codexUserQuestionRefusal(installation.via === "executable" ? installation.version : undefined),
-    steer: true, images: true, mcpTransports: ["stdio", "http"], stopTask: true,
+    ...codexSessionCapabilities(), mcpTransports: ["stdio", "http"], stopTask: true,
     ...(installation.via === "executable" && semverAtLeast(installation.version, "0.160.1") ? { fileChanges: true } : {}),
     ...(installation.via === "executable" && semverAtLeast(installation.version, "0.169.0") ? { nativeSessionFile: true, mcpStartup: { kind: "per_server", firstModelRequest: "may_start_pending" } } : {}),
     ...(installation.via === "executable" && semverAtLeast(installation.version, "0.151.0") ? { contextUsage: { tokens: true, contextWindow: true } } : {}),
