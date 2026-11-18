@@ -1,9 +1,9 @@
-import { withQueryDeadline } from "../../shared/executable/query.js";
-import type { SessionOptions } from "../../contracts/session-options.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 import { randomUUID } from "node:crypto";
-import type { ModelEntry, ModelLister } from "../../contracts/list-models.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { effortLevelsOf } from "../../shared/effort-levels.js";
-import { spawnLineProcess } from "../../shared/executable/index.js";
 import { asRecord, asRecordList, parseJson, type JsonRecord } from "../../shared/json.js";
 import { listingCwd } from "../../shared/listing-cwd.js";
 import { claudeEnv } from "./environment.js";
@@ -73,39 +73,42 @@ function controlError(inner: JsonRecord): string {
  * and the answer is the same models, faster). User settings stay loaded —
  * provider env and apiKeyHelper live there — so authentication is unaffected.
  */
-async function readListModels(command: string, cwd: string, timeoutMs: number, env: SessionOptions["env"]): Promise<ReadOutcome> {
-  const result = await withQueryDeadline<ReadOutcome>("Claude model listing", timeoutMs, async (_signal, own) => {
-    const child = own(spawnLineProcess(command, [
-      "-p",
-      "--input-format", "stream-json",
-      "--output-format", "stream-json",
-      "--verbose",
-      "--settings", "{\"disableAllHooks\":true}",
-      "--strict-mcp-config",
-      "--mcp-config", "{\"mcpServers\":{}}",
-    ], { cwd, env: claudeEnv(env), killTree: true }));
-    const requestId = `oar-list-models-${randomUUID()}`;
-    const { promise: answered, resolve } = Promise.withResolvers<JsonRecord | null>();
-    child.onLine((line) => {
-      const message = asRecord(parseJson(line));
-      if (message?.type !== "control_response") {
-        return;
-      }
-      const inner = asRecord(message.response);
-      if (inner?.request_id === requestId) {
-        resolve(inner);
-      }
-    });
-    child.onExit(() => {
-      resolve(null);
-    });
+async function readListModels(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
+  const child = options.spawn(command, [
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--settings", "{\"disableAllHooks\":true}",
+    "--strict-mcp-config",
+    "--mcp-config", "{\"mcpServers\":{}}",
+  ], { cwd: listingCwd(options), env: claudeEnv(options.env) });
+  const requestId = `oar-list-models-${randomUUID()}`;
+  const { promise: answered, resolve } = Promise.withResolvers<JsonRecord | null>();
+  child.onLine((line) => {
+    const message = asRecord(parseJson(line));
+    if (message?.type !== "control_response") {
+      return;
+    }
+    const inner = asRecord(message.response);
+    if (inner?.request_id === requestId) {
+      resolve(inner);
+    }
+  });
+  child.onExit(() => {
+    resolve(null);
+  });
+  const timer = setTimeout(() => {
+    child.kill();
+  }, options.timeoutMs);
+  try {
     await child.spawned;
     child.write(`${JSON.stringify({
       type: "control_request",
       request_id: requestId,
       request: { subtype: "list_models" },
     })}\n`);
-    const inner = await answered;
+    const inner = await Promise.race([answered, child.exited.then(() => null)]);
     if (inner === null) {
       return { kind: "error", detail: "claude exited before answering list_models" };
     }
@@ -117,23 +120,26 @@ async function readListModels(command: string, cwd: string, timeoutMs: number, e
       return { kind: "unauthenticated", detail };
     }
     return { kind: "error", detail };
-  });
-  return result;
-}
-
-async function readOutcome(command: string, cwd: string, timeoutMs: number, env: SessionOptions["env"]): Promise<ReadOutcome> {
-  try {
-    return await readListModels(command, cwd, timeoutMs, env);
-  } catch (error) {
-    throw new Error(error instanceof DOMException && error.name === "TimeoutError" ? "Failed to list Claude models: timed out" : "Failed to list Claude models", { cause: error });
+  } finally {
+    clearTimeout(timer);
+    child.kill();
+    await child.exited;
   }
 }
 
-export const claudeListModels: ModelLister = async (installation, options = {}) => {
+async function readOutcome(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
+  try {
+    return await readListModels(command, options);
+  } catch (error) {
+    throw new Error("Failed to list Claude models", { cause: error });
+  }
+}
+
+export async function claudeListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "claude model listing requires the claude executable" };
   }
-  const outcome = await readOutcome(installation.command, listingCwd(options), options.timeoutMs ?? 15_000, options.env);
+  const outcome = await readOutcome(installation.command, options);
   if (outcome.kind === "ok") {
     return { kind: "ok", models: projectClaudeModels(outcome.payload) };
   }
@@ -141,4 +147,4 @@ export const claudeListModels: ModelLister = async (installation, options = {}) 
     return { kind: "unauthenticated", detail: outcome.detail };
   }
   throw new Error(`Failed to list Claude models: ${outcome.detail}`);
-};
+}

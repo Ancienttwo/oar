@@ -1,7 +1,8 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
 import type { AvailableInstallation } from "../../contracts/installation.js";
-import type { AuthStatus, AuthStatusOptions, LoginAccount } from "../../contracts/login.js";
-import { runExecutable } from "../../shared/executable/index.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AuthStatus, LoginAccount } from "../../contracts/login.js";
 import { asRecord, parseJson } from "../../shared/json.js";
 import { rememberedClaudeAccount } from "./last-account.js";
 import { claudeEnv } from "./environment.js";
@@ -47,12 +48,12 @@ export interface ClaudeAuthRead {
 /** `signal` (internal: the login's own) stops the query; the answer is then `unknown`. */
 export async function readClaudeAuthStatus(
   installation: AvailableInstallation,
-  options: AuthStatusOptions & { readonly signal?: AbortSignal } = {},
+  options: OwnedReaderOptions,
 ): Promise<ClaudeAuthRead> {
   if (installation.via !== "executable") {
     return { status: { kind: "unknown", detail: "not a machine-installed executable" } };
   }
-  const result = await runExecutable(installation.command, ["auth", "status", "--json"], {
+  const result = await options.run(installation.command, ["auth", "status", "--json"], {
     env: claudeEnv(options.env),
     timeoutMs: options.timeoutMs ?? STATUS_TIMEOUT_MS,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -68,7 +69,7 @@ export async function readClaudeAuthStatus(
 
 export async function claudeAuthStatus(
   installation: AvailableInstallation,
-  options: AuthStatusOptions = {},
+  options: OwnedReaderOptions,
 ): Promise<AuthStatus> {
   const result = await withQueryDeadline<AuthStatus>("Claude auth status", options.timeoutMs ?? STATUS_TIMEOUT_MS, async (signal) => {
     const { status } = await readClaudeAuthStatus(installation, { ...options, signal });

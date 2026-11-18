@@ -1,8 +1,8 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
-import type { SessionOptions } from "../../contracts/session-options.js";
-import type { AccountUsageReader, AccountUsageSnapshot, AccountUsageWindow, AccountUsageWindowScope } from "../../contracts/account-usage.js";
-import { runExecutable, spawnLineProcess } from "../../shared/executable/index.js";
-import { assertRan } from "../../shared/executable/diagnostics.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { AccountUsageSnapshot, AccountUsageWindow, AccountUsageWindowScope } from "../../contracts/account-usage.js";
 import { remainingMs } from "../../shared/deadline.js";
 import { utcInstantFromDate } from "../../shared/instant.js";
 import { asNumber, asRecord, asRecordList, parseJson, type JsonRecord } from "../../shared/json.js";
@@ -115,19 +115,19 @@ async function controlFailure(reply: JsonRecord, env: NodeJS.ProcessEnv, email?:
  */
 const USAGE = "Claude account usage";
 const safeModeSupport = new Map<string, boolean>();
-async function supportsSafeMode(command: string, version: string | undefined, deadline: number, env: SessionOptions["env"], signal: AbortSignal): Promise<boolean> {
+async function supportsSafeMode(command: string, version: string | undefined, deadline: number, options: OwnedReaderOptions, signal: AbortSignal): Promise<boolean> {
   const key = `${command}\0${version ?? ""}`;
-  const cacheable = Object.keys(env ?? {}).length === 0;
+  const cacheable = Object.keys(options.env).length === 0;
   const known = cacheable ? safeModeSupport.get(key) : undefined;
   if (known !== undefined) {
     return known;
   }
-  const help = await runExecutable(command, ["--help"], {
-    env: claudeEnv(env), signal,
+  const help = await options.run(command, ["--help"], {
+    env: claudeEnv(options.env), signal,
     timeoutMs: remainingMs(deadline, USAGE),
   });
   signal.throwIfAborted();
-  assertRan(help, `Failed to run ${command} --help`);
+  if (help.exitCode === null) { throw new Error("Claude help probe did not exit normally"); }
   if (!help.ok) {
     return false;
   }
@@ -141,7 +141,7 @@ async function supportsSafeMode(command: string, version: string | undefined, de
  * Fresh-process session totals are deliberately not exposed as account usage.
  * initialize provides optional account identity; get_usage owns quota access.
  */
-export const claudeAccountUsage: AccountUsageReader = async (installation, options = {}) => {
+export async function claudeAccountUsage(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "unsupported_installation" };
   }
@@ -150,16 +150,16 @@ export const claudeAccountUsage: AccountUsageReader = async (installation, optio
   const timeoutMs = options.timeoutMs ?? 30_000;
   const deadline = Date.now() + timeoutMs;
   const result = await withQueryDeadline<AccountUsageSnapshot>(USAGE, timeoutMs, async (signal) => {
-    if (!await supportsSafeMode(installation.command, installation.version, deadline, options.env, signal)) {
+    if (!await supportsSafeMode(installation.command, installation.version, deadline, options, signal)) {
       return { kind: "unsupported", reason: "unsupported_installation" };
     }
     signal.throwIfAborted();
     remainingMs(deadline, USAGE);
     const env = claudeEnv(options.env);
-    const child = spawnLineProcess(installation.command, [
+    const child = options.spawn(installation.command, [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json",
       "--verbose", "--no-session-persistence", "--safe-mode",
-    ], { env, killTree: true });
+    ], { env });
     let pending: { id: string; resolve: (reply: JsonRecord | null) => void } | null = null;
     let ended = false;
     child.onLine((line) => {
@@ -173,10 +173,6 @@ export const claudeAccountUsage: AccountUsageReader = async (installation, optio
       ended = true;
       pending?.resolve(null);
     });
-    child.stdin.on("error", () => {
-      ended = true;
-      pending?.resolve(null);
-    });
     const stop = (): void => { pending?.resolve(null); child.kill(); };
     signal.addEventListener("abort", stop, { once: true });
     const query = async (request: JsonRecord): Promise<JsonRecord> => {
@@ -187,7 +183,7 @@ export const claudeAccountUsage: AccountUsageReader = async (installation, optio
       const { promise, resolve } = Promise.withResolvers<JsonRecord | null>();
       pending = { id, resolve };
       child.write(`${JSON.stringify({ type: "control_request", request_id: id, request })}\n`);
-      const reply = await promise;
+      const reply = await Promise.race([promise, child.exited.then(() => null)]);
       pending = null;
       if (reply === null) {
         throw new Error("Claude exited or timed out before answering usage query");
@@ -215,4 +211,4 @@ export const claudeAccountUsage: AccountUsageReader = async (installation, optio
     }
   });
   return result;
-};
+}

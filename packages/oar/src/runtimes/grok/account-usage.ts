@@ -1,12 +1,13 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
-import { sessionEnvironment } from "../../shared/environment.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 /* oxlint-disable typescript/promise-function-async -- Deadline callbacks deliberately return the SDK's native promises. */
 import {
   methods,
   RequestError,
 } from "@agentclientprotocol/sdk";
 import type {
-  AccountUsageReader,
   AccountUsageSnapshot,
   UtcInstant,
 } from "../../contracts/account-usage.js";
@@ -105,9 +106,9 @@ const USAGE = "Grok account usage";
 // before the caller's deadline, without waiting for process cleanup.
 const IDENTITY_MARGIN_MS = 100;
 
-async function readBilling(command: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<AccountUsageSnapshot> {
+async function readBilling(command: string, timeoutMs: number, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   const deadline = Date.now() + timeoutMs;
-  const runtime = startGrokReader(command, env);
+  const runtime = startGrokReader(command, options);
   const stop = (): void => { runtime.kill(); };
   try {
     // Billing or an explicit refusal settles first. Reading optional identity
@@ -175,17 +176,17 @@ async function readBilling(command: string, timeoutMs: number, env: NodeJS.Proce
   }
 }
 
-export const grokAccountUsage: AccountUsageReader = async (installation, options = {}) => {
+export async function grokAccountUsage(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "unsupported_installation" };
   }
   try {
     // One grok start and up to four requests, which a slow launcher stretches.
-    return await readBilling(installation.command, options.timeoutMs ?? 30_000, sessionEnvironment(options.env));
+    return await readBilling(installation.command, options.timeoutMs, options);
   } catch (error) {
     if (error instanceof RequestError && error.code === -32_601) {
       return { kind: "unsupported", reason: "endpoint_unavailable" };
     }
     throw new Error("Failed to read Grok account usage", { cause: error });
   }
-};
+}
