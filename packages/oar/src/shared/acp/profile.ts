@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR a122061 to forward caller cancellation to the startup gate (Apache-2.0).
 /* oxlint-disable import/max-dependencies -- Session profiles and assembly wire the native control, projection and lifecycle helpers. */
 /* oxlint-disable typescript/promise-function-async -- Deadline callbacks deliberately return the SDK's native promises. */
 import type { CompactionOperation } from "../manual-compaction.js";
@@ -40,7 +41,7 @@ export interface AcpSessionProfile extends AcpDerivedSessionHooks, AcpSteerReque
   /** Only initialize; default 60 seconds, independent of requestTimeoutMs. */
   readonly initializeTimeoutMs?: number;
   /** Isolated process startup only. Returns an idempotent release for initialize, exit or failed open. */
-  readonly acquireStartup?: (options: SessionOptions, timeoutMs: number) => Promise<() => void>;
+  readonly acquireStartup?: (options: SessionOptions, timeoutMs: number, signal?: AbortSignal) => Promise<() => void>;
   readonly maxInputBytes?: number; // OAR's bound on one input's UTF-8 bytes, for a runtime seen to cut long input silently: longer ones are refused (`unsupported`, `input_too_large`)
   /** Only session/new and session/resume, when native startup work needs a larger bound. */
   readonly sessionStartTimeoutMs?: number;
