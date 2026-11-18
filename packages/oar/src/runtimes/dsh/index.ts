@@ -1,3 +1,4 @@
+import { dshSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { verifiedPlatforms } from "../../platforms.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -15,6 +16,7 @@ export const dshRuntime = defineRuntime({
     const version = installation.via === "executable" ? installation.version : undefined;
     const nativeSessionFile = dshSupportsNativeSessionFile(version);
     return {
+      ...dshSessionCapabilities(),
       ...(nativeSessionFile === undefined ? {} : { nativeSessionFile }),
       ...(semverAtLeast(version, DSH_MINIMUM_VERSION) ? { taskEventTypes: ["agent", "shell"] } : {}),
       ...(semverAtLeast(version, "0.2.2-rc.5") ? { subagentResults: { background: "child_text" } } : {}),
