@@ -1,3 +1,4 @@
+import { grokSessionCapabilities } from "./session.js";
 import { runtimeBrands } from "../../brands.js";
 import { grokSkills, grokMcpServers } from "./inventory.js";
 import { defineRuntime } from "../../contracts/runtime.js";
@@ -10,7 +11,7 @@ import { grokRefusedSessionOptions } from "./options.js";
 
 export const grokRuntime = defineRuntime({
   id: "grok",
-  sessionCapabilities: () => ({ steer: true, images: true }),
+  sessionCapabilities: grokSessionCapabilities,
   brand: runtimeBrands.grok,
   manualCompaction: { kind: "supported", activeTurn: "reject" },
   refusedSessionOptions: grokRefusedSessionOptions,
