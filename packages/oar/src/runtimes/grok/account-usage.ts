@@ -1,5 +1,7 @@
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
 import { withQueryDeadline } from "../../shared/executable/query.js";
-import { sessionEnvironment } from "../../shared/environment.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
 /* oxlint-disable typescript/promise-function-async -- Deadline callbacks deliberately return the SDK's native promises. */
 import {
   client as createClient,
@@ -8,7 +10,6 @@ import {
   RequestError,
 } from "@agentclientprotocol/sdk";
 import type {
-  AccountUsageReader,
   AccountUsageSnapshot,
   UtcInstant,
 } from "../../contracts/account-usage.js";
@@ -120,13 +121,13 @@ const USAGE = "Grok account usage";
 // before the caller's deadline, without waiting for process cleanup.
 const IDENTITY_MARGIN_MS = 100;
 
-async function readBilling(command: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<GrokAccountPayload> {
+async function readBilling(command: string, timeoutMs: number, options: OwnedReaderOptions): Promise<GrokAccountPayload> {
   const deadline = Date.now() + timeoutMs;
   const runtime = startAcpProcess(
-    command,
+    options.spawn, command,
     ["agent", "--always-approve", "--no-leader", "stdio"],
     createClient({ name: "oar" }),
-    { env },
+    { env: options.env, redact: options.redact },
   );
   const stop = (): void => { runtime.kill(); };
   try {
@@ -216,13 +217,13 @@ async function readBilling(command: string, timeoutMs: number, env: NodeJS.Proce
   }
 }
 
-export const grokAccountUsage: AccountUsageReader = async (installation, options = {}) => {
+export async function grokAccountUsage(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<AccountUsageSnapshot> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "unsupported_installation" };
   }
   try {
     // One grok start and up to four requests, which a slow launcher stretches.
-    const payload = await readBilling(installation.command, options.timeoutMs ?? 30_000, sessionEnvironment(options.env));
+    const payload = await readBilling(installation.command, options.timeoutMs, options);
     return projectGrokUsage(payload.billing, payload.email);
   } catch (error) {
     if (error instanceof RequestError) {
@@ -235,4 +236,4 @@ export const grokAccountUsage: AccountUsageReader = async (installation, options
     }
     throw new Error("Failed to read Grok account usage", { cause: error });
   }
-};
+}

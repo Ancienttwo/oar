@@ -1,11 +1,10 @@
-import { withQueryDeadline } from "../../shared/executable/query.js";
-import { sessionEnvironment } from "../../shared/environment.js";
-import type { ListModelsResult, ModelEntry, ModelLister } from "../../contracts/list-models.js";
-import { runExecutable } from "../../shared/executable/index.js";
-import { processFailure, stderrTail } from "../../shared/executable/diagnostics.js";
+// BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { AvailableInstallation } from "../../contracts/installation.js";
+import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
 import { asRecord, parseJson } from "../../shared/json.js";
 import { listingCwd } from "../../shared/listing-cwd.js";
-import { opencodeRelease } from "./version.js";
+import { opencodeMajor } from "./version.js";
 
 function text(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -62,30 +61,23 @@ export function projectOpencodeModels(stdout: string): ModelEntry[] {
  * Reads opencode's model catalog in the listing's cwd, whose project config can
  * add providers; the first run after an install also fetches models.dev.
  */
-export const opencodeListModels: ModelLister = async (installation, options = {}) => {
+export async function opencodeListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
   if (installation.via !== "executable") {
     return { kind: "unsupported", reason: "opencode model listing requires the opencode executable" };
   }
-  const timeoutMs = options.timeoutMs ?? 30_000;
-  const answer = await withQueryDeadline<ListModelsResult>("OpenCode model listing", timeoutMs, async signal => {
-    const { major } = await opencodeRelease(installation, { signal, timeoutMs, cwd: listingCwd(options), ...(options.env === undefined ? {} : { env: options.env }) });
-    signal.throwIfAborted();
-    // v2's default command connects to a persistent daemon. Listing must not leave one behind.
-    const result = await runExecutable(installation.command, ["models", major === 2 ? "--standalone" : "--verbose"], { cwd: listingCwd(options), env: sessionEnvironment(options.env), timeoutMs, signal });
-    if (!result.ok) {
-      throw processFailure("Failed to list opencode models", result.diagnostics ?? {
-        exitCode: result.exitCode, signal: null, stderr: stderrTail(result.stderr),
-      });
-    }
-    if (major === 1) { return { kind: "ok", models: projectOpencodeModels(result.stdout) }; }
-    const ids = result.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
-    if (ids.length === 0) {
-      return { kind: "unsupported", reason: "opencode 2.0.26 models --standalone exits before the cold catalog finishes loading; an empty response does not establish that no models exist (https://github.com/anomalyco/opencode/issues/53724)" };
-    }
-    if (ids.some((id) => !/^\S+\/\S+$/u.test(id))) {
-      throw new Error("opencode models --standalone returned an unrecognized model listing");
-    }
-    return { kind: "ok", models: ids.map((id) => ({ id })) };
-  });
-  return answer;
-};
+  const major = await opencodeMajor(installation, { cwd: listingCwd(options), ...(options.env === undefined ? {} : { env: options.env }) });
+  // v2's default command connects to a persistent daemon. Listing must not leave one behind.
+  const result = await options.run(installation.command, ["models", major === 2 ? "--standalone" : "--verbose"], { ...options, cwd: listingCwd(options) });
+  if (!result.ok) {
+    throw new Error(`Failed to list opencode models (exit ${String(result.exitCode)})`);
+  }
+  if (major === 1) { return { kind: "ok", models: projectOpencodeModels(result.stdout) }; }
+  const ids = result.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  if (ids.length === 0) {
+    return { kind: "unsupported", reason: "opencode 2.0.26 models --standalone exits before the cold catalog finishes loading; an empty response does not establish that no models exist (https://github.com/anomalyco/opencode/issues/53724)" };
+  }
+  if (ids.some((id) => !/^\S+\/\S+$/u.test(id))) {
+    throw new Error("opencode models --standalone returned an unrecognized model listing");
+  }
+  return { kind: "ok", models: ids.map((id) => ({ id })) };
+}
