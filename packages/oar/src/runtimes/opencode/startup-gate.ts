@@ -1,9 +1,10 @@
+// BYOK change: Modified from OAR a122061 so the startup gate uses the owned environment and typed errors (Apache-2.0).
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { SessionOptions } from "../../contracts/session.js";
 import { environmentHome } from "../../shared/environment-home.js";
 import { environmentValue, sessionEnvironment } from "../../shared/environment.js";
-import { acpRequestTimeoutError } from "../../shared/acp/errors.js";
+import { AcpError, acpRequestTimeoutError } from "../../shared/acp/errors.js";
 
 interface Waiter { readonly grant: () => void }
 const directories = new Map<string, Waiter[]>();
@@ -22,7 +23,8 @@ function canonical(directory: string): string {
 function errorReason(value: unknown): Error { return value instanceof Error ? value : new Error("OpenCode startup wait cancelled"); }
 
 function dataDirectory(options: SessionOptions): string {
-  const env = sessionEnvironment(options.env);
+  // BYOK change: use the complete environment supplied to the owned child.
+  const env = sessionEnvironment(options.env, {});
   const xdg = environmentValue(env, "XDG_DATA_HOME");
   const root = xdg === undefined || xdg === "" ? join(environmentHome(env), ".local", "share") : xdg;
   // Native Global.Path.data uses xdg-basedir, not OPENCODE_TEST_HOME.
@@ -50,7 +52,9 @@ function ownership(directory: string, waiters: Waiter[]): () => void {
 // oxlint-disable-next-line typescript/promise-function-async -- The uncontended path owns the lock synchronously; waiters resolve on release or cancellation.
 export function acquireOpenCodeStartup(options: SessionOptions, timeoutMs = 60_000, signal?: AbortSignal): Promise<() => void> {
   try { signal?.throwIfAborted(); } catch (error) { return Promise.reject(errorReason(error)); }
-  const directory = dataDirectory(options);
+  let directory: string;
+  try { directory = dataDirectory(options); }
+  catch { return Promise.reject(new AcpError("startup_directory", "OpenCode could not resolve its startup data directory")); }
   const existing = directories.get(directory);
   if (existing === undefined) {
     const waiters: Waiter[] = [];
