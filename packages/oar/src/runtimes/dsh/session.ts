@@ -27,7 +27,7 @@ import { isBackgroundShellJob } from "./jobs.js";
 import { launchDsh, type DshLaunch, type DshLineProcess, type SpawnDshLineProcess } from "./launch.js";
 import { dshMcpRows } from "./mcp.js";
 import { dshAgentOptions, dshDirectoryRefusal, dshRefusedSessionOptions, dshSessionLogUploadRefusal, type DshAgentOptions } from "./options.js";
-import { dshOpenedFrame, foldDsh, initialDshProjection } from "./projection.js";
+import { dshOpenedFrame, foldDsh, initialDshProjection, redactDshRecord } from "./projection.js";
 
 const OPEN_TIMEOUT_MS = 60_000;
 const DISPOSE_TIMEOUT_MS = 8000;
@@ -120,7 +120,7 @@ async function open(spawnLineProcess: SpawnDshLineProcess, command: string, opti
   const sessionId = options.resume ?? randomUUID();
   const agentOptions = dshAgentOptions(options);
   // BYOK change: the record consumer observes from seq 0: it registers before any frame.
-  const kernel = createSessionKernel(sessionId, credentials.redactValue, options.retainedBytes);
+  const kernel = createSessionKernel(sessionId, record => redactDshRecord(record, credentials), options.retainedBytes);
   if (hooks.onRecord !== undefined) { kernel.rawEvents(hooks.onRecord); }
   hooks.onReady?.(sessionId);
   let projection = initialDshProjection(sessionId);

@@ -1,64 +1,68 @@
-/* oxlint-disable import/prefer-default-export -- Shared named helper. */
-interface RedactionShape {
-  readonly key: (key: string, path: readonly string[]) => string;
-  readonly text?: (text: string, path: readonly string[]) => string | undefined;
-  readonly preserve: (key: string, value: unknown, owner: object, path: readonly string[]) => boolean;
+// BYOK change: redact decoded JSON values and withhold maps with credential-bearing keys (Apache-2.0).
+/* oxlint-disable import/prefer-default-export -- Shared named helpers. */
+export type RedactionPath = readonly (string | number)[];
+type Redact = (text: string) => string;
+type JsonField = (path: RedactionPath) => boolean;
+// Node 24 and Bun implement JSON source access. OAR's ES2024 library
+// predates the standard library declarations for it.
+const jsonSource = JSON as unknown as {
+  parse(text: string, reviver: (key: string, value: unknown, context?: { source?: string }) => unknown): unknown;
+  rawJSON(text: string): object;
+  isRawJSON(value: unknown): boolean;
+};
+
+/** Copy only changed values. A credential-bearing property name hides its containing object. */
+function sanitize(value: unknown, redact: Redact, jsonField: JsonField | undefined, path: RedactionPath, seen: WeakMap<object, unknown>): unknown {
+  if (typeof value === "string") return jsonField?.(path) === true ? redactJsonText(value, redact) : redact(value);
+  if (value === null || typeof value !== "object" || jsonSource.isRawJSON(value)) return value;
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    seen.set(value, result);
+    value.forEach((item: unknown, index) => { result.push(sanitize(item, redact, jsonField, [...path, index], seen)); });
+    const sanitized = result.every((item, index) => item === value[index]) ? value : result;
+    seen.set(value, sanitized);
+    return sanitized;
+  }
+  const keys = Object.getOwnPropertyNames(value);
+  if (keys.some(key => redact(key) !== key)) return "[redacted]";
+  const target = Object.create(Object.getPrototypeOf(value)) as object;
+  seen.set(value, target);
+  let changed = false;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined) continue;
+    if ("value" in descriptor) {
+      const original: unknown = descriptor.value;
+      const sanitized = sanitize(original, redact, jsonField, [...path, key], seen);
+      changed ||= sanitized !== original;
+      Object.defineProperty(target, key, { ...descriptor, value: sanitized });
+    } else if (value instanceof Error && key === "stack" && typeof value.stack === "string") {
+      const stack = redact(value.stack);
+      changed ||= stack !== value.stack;
+      Object.defineProperty(target, key, { value: stack, configurable: true, writable: true });
+    }
+  }
+  const sanitized = changed ? target : value;
+  seen.set(value, sanitized);
+  return sanitized;
 }
 
-/** Copy diagnostic data, including Error fields and cause chains, replacing known strings without mutating native inputs. */
-export function redactText<T>(value: T, redact: (text: string) => string, contains: (text: string) => boolean, shape?: RedactionShape): T {
-  const redactKey = shape?.key ?? redact;
-  const preserve = shape?.preserve;
-  const scanned = new Set<object>();
-  const matches = (entry: unknown, path: readonly string[]): boolean => {
-    if (typeof entry === "string") {
-      const transformed = shape?.text?.(entry, path);
-      return transformed === undefined ? contains(entry) : transformed !== entry;
-    }
-    if (entry === null || typeof entry !== "object" || scanned.has(entry)) { return false; }
-    scanned.add(entry);
-    if (Array.isArray(entry)) { return entry.some((item) => matches(item, path)); }
-    return Object.getOwnPropertyNames(entry).some((key) => {
-      if (shape === undefined ? contains(key) : redactKey(key, path) !== key) { return true; }
-      const descriptor = Object.getOwnPropertyDescriptor(entry, key);
-      if (descriptor !== undefined && "value" in descriptor) {
-        return preserve?.(key, descriptor.value, entry, path) !== true && matches(descriptor.value, [...path, key]);
-      }
-      return entry instanceof Error && key === "stack" && matches(entry.stack, [...path, key]);
-    });
-  };
-  if (!matches(value, [])) { return value; }
+/** Opaque application data, never an outbound runtime message. */
+export function redactText<T>(value: T, redact: Redact, jsonField?: JsonField): T {
+  return sanitize(value, redact, jsonField, [], new WeakMap()) as T;
+}
 
-  const seen = new Map<object, unknown>();
-  const copy = (entry: unknown, path: readonly string[]): unknown => {
-    if (typeof entry === "string") { return shape?.text?.(entry, path) ?? redact(entry); }
-    if (entry === null || typeof entry !== "object") { return entry; }
-    if (seen.has(entry)) { return seen.get(entry); }
-    if (Array.isArray(entry)) {
-      const result: unknown[] = [];
-      seen.set(entry, result);
-      for (const item of entry) { result.push(copy(item, path)); }
-      return result;
-    }
-    // Keep native Error classes (notably RuntimeFailureError) and non-enumerable
-    // message/stack/cause, even for frozen SDK errors. Never unwrap spawn errors.
-    // oxlint-disable-next-line typescript/no-unsafe-assignment, typescript/no-unsafe-argument -- Object's reflection API is untyped; preserve the native Error brand and its class prototype.
-    const result: object = entry instanceof Error ? Object.setPrototypeOf(new Error(redact(entry.message)), Object.getPrototypeOf(entry)) : {};
-    seen.set(entry, result);
-    for (const key of Object.getOwnPropertyNames(entry)) {
-      const descriptor = Object.getOwnPropertyDescriptor(entry, key);
-      if (descriptor !== undefined && "value" in descriptor) {
-        const value = preserve?.(key, descriptor.value, entry, path) === true ? descriptor.value : copy(descriptor.value, [...path, key]);
-        Object.defineProperty(result, redactKey(key, path), { ...descriptor, value });
-      } else if (entry instanceof Error && key === "stack" && typeof entry.stack === "string") {
-        // Node 24 exposes the lazily computed stack as an accessor. Copy its
-        // redacted text, never a getter closing over the original Error.
-        Object.defineProperty(result, "stack", { value: redact(entry.stack), configurable: true, writable: true });
-      }
-    }
-    return result;
-  };
-  // Text leaves keep their types; only strings change, never the structure's kinds.
-  // oxlint-disable-next-line typescript/consistent-type-assertions, typescript/no-unsafe-type-assertion -- The recursive copy preserves scalar types, descriptors and array/object structure.
-  return copy(value, []) as T;
+/** The protocol declares this field as encoded JSON. Malformed input is withheld. */
+export function redactJsonText(text: string, redact: Redact): string {
+  let parsed: unknown;
+  try {
+    // Preserve every number's exact spelling even when a sibling value changes.
+    parsed = jsonSource.parse(text, (_key, value, context) =>
+      typeof value === "number" && context?.source !== undefined ? jsonSource.rawJSON(context.source) : value);
+  } catch {
+    return '"[redacted]"';
+  }
+  const sanitized = sanitize(parsed, redact, undefined, [], new WeakMap());
+  return sanitized === parsed ? text : JSON.stringify(sanitized);
 }
