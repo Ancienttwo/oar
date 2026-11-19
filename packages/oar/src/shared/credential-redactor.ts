@@ -22,9 +22,22 @@ const ID_LIST_FIELDS = new Set(["agentPath", "inputIds", "carries"]);
 const CONTENT_FIELD_NAMES = new Set([
   "native", "events", "body", "input", "output", "outputDelta", "result", "reason", "message", "cause", "text", "data",
   "outcome", "model", "credential", "structuredOutput", "update", "arguments", "rawInput", "rawOutput", "content",
-  "usage", "tokens", "context", "metadata", "header", "config", "error", "tool", "toolName", "server", "name",
+  "usage", "tokens", "context", "metadata", "_meta", "header", "config", "error", "tool", "toolName", "server", "name",
 ]);
-const OPAQUE_CONTENT = new Set(["arguments", "rawInput", "rawOutput", "structuredOutput", "cause", "metadata", "value"]);
+const OPAQUE_CONTENT = new Set(["arguments", "rawInput", "rawOutput", "structuredOutput", "cause", "metadata", "_meta", "value"]);
+const JSON_STRING = /"(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/gu;
+
+/** dsh's native arguments carry serialized JSON. Replace only JSON strings. */
+function redactSerializedArguments(text: string, redact: (text: string) => string): string | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return undefined; }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  return text.replace(JSON_STRING, (literal) => {
+    const value = JSON.parse(literal) as string;
+    const sanitized = redact(value);
+    return sanitized === value ? literal : JSON.stringify(sanitized);
+  });
+}
 
 function preservesStructure(key: string, value: unknown, owner: object, path: readonly string[]): boolean {
   if (path.some(segment => OPAQUE_CONTENT.has(segment))) return false;
@@ -101,6 +114,7 @@ export function sessionCredentialRedactor(options: Partial<SessionOptions>): Cre
   };
   const shape = {
     preserve: preservesStructure,
+    text: (text: string, path: readonly string[]) => path.at(-1) === "arguments" ? redactSerializedArguments(text, redact) : undefined,
     // Protocol fields keep their names. A known credential used as a dynamic
     // property name still cannot enter retained diagnostic data.
     key: (key: string, path: readonly string[]) => {
