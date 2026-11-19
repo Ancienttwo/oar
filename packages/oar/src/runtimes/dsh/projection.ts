@@ -1,4 +1,7 @@
-import type { FailureClass, FrameBody, RuntimeEventBody, TokenTotals, TurnOutcome } from "../../contracts/session.js";
+// BYOK change: derive tool inputs from protocol-aware redaction (Apache-2.0).
+import type { FailureClass, FrameBody, RawEvent, RuntimeEventBody, TokenTotals, TurnOutcome } from "../../contracts/session.js";
+import type { CredentialRedactor } from "../../shared/credential-redactor.js";
+import type { RedactionPath } from "../../shared/redact-text.js";
 import { asNumber, asRecord, asRecordList, type JsonRecord } from "../../shared/json.js";
 import { failureFromStatus } from "../../shared/failure-class.js";
 import { addTokens, noTokens } from "../../shared/token-totals.js";
@@ -175,7 +178,7 @@ function sessionEvent(state: DshProjection, sessionId: string, session: DshSessi
     }
     case "tool/call":
       return { ...unchanged, events: typeof data.callId === "string" && typeof data.name === "string"
-        ? [{ kind: "tool_call_started", callId: data.callId, tool: data.name, ...(typeof data.arguments === "string" ? { input: data.arguments } : {}) }] : [] };
+        ? [{ kind: "tool_call_started", callId: data.callId, tool: data.name }] : [] };
     case "tool/result":
       return { ...unchanged, events: toolEnd(asRecord(data.message) ?? {}) };
     case "assistant/message":
@@ -270,6 +273,32 @@ export function foldDsh(state: DshProjection, message: JsonRecord): DshFolded {
   const events = message.channel === "agent/assistant-stream" ? streamEvents(asRecord(native) ?? {})
     : (message.channel === "subagent/start" || message.channel === "subagent/end" ? subagentEvents(message.channel, asRecord(native) ?? {}) : []);
   return { state, frame: { ...at, body: { type: String(message.channel), native, events } } };
+}
+
+function isToolArguments(path: RedactionPath): boolean {
+  return path.length === 4 && path[0] === "body" && path[1] === "native" && path[2] === "data" && path[3] === "arguments";
+}
+
+function isAssistantToolArguments(path: RedactionPath, native: unknown): boolean {
+  if (path.length !== 7 || path[0] !== "body" || path[1] !== "native" || path[2] !== "data"
+    || path[3] !== "message" || path[4] !== "content" || typeof path[5] !== "number" || path[6] !== "arguments") return false;
+  const content = asRecord(asRecord(asRecord(native)?.data)?.message)?.content;
+  return Array.isArray(content) && asRecord(content[path[5]])?.type === "tool-call";
+}
+
+/** BYOK change: the projected input is derived from the same sanitized JSON as the native payload. */
+export function redactDshRecord<T extends RawEvent>(record: T, credentials: CredentialRedactor): T {
+  if (record.kind !== "frame") return credentials.redactValue(record);
+  if (record.body.type === "session/event:assistant/message") {
+    return credentials.redactValue(record, path => isAssistantToolArguments(path, record.body.native));
+  }
+  if (record.body.type !== "session/event:tool/call") return credentials.redactValue(record);
+  const safe = credentials.redactValue(record, isToolArguments);
+  const body = asRecord(safe.body);
+  const args = asRecord(asRecord(body?.native)?.data)?.arguments;
+  if (safe.kind !== "frame" || typeof args !== "string" || !Array.isArray(body?.events)) return safe;
+  return { ...safe, body: { ...safe.body, events: safe.body.events.map(event =>
+    event.kind === "tool_call_started" ? { ...event, input: args } : event) } };
 }
 
 /** The frame that says what a native open returned; alpha releases report a model selection already. */

@@ -1,57 +1,13 @@
 // BYOK change: Modified from OAR a122061 to accept explicitly resolved credentials (Apache-2.0).
 /* oxlint-disable import/prefer-default-export -- Shared named helper. */
 import type { SessionOptions } from "../contracts/session.js";
-import { redactText } from "./redact-text.js";
+import { redactText, type RedactionPath } from "./redact-text.js";
 
 const CREDENTIAL_WORDS = new Set(["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL", "CREDENTIALS", "COOKIE", "PWD"]);
 const AUTH_HEADERS = new Set(["AUTHORIZATION", "PROXY-AUTHORIZATION"]);
 const CREDENTIAL_NAMES = new Set(["PGPASSWORD"]);
 const CREDENTIAL_MIN_LENGTH = 8;
 const PATH_VALUE = /^(?:\/|~\/|[a-z]:\\)/iu;
-// Record and native-protocol routing, correlation and enum fields carry structure.
-// Their string values may coincide with a Host key, especially a short key.
-const STRUCTURAL_FIELDS = new Set([
-  "kind", "type", "direction", "method", "jsonrpc", "sessionUpdate", "stopReason",
-  "status", "failure", "phase", "action", "code", "placement", "admission", "queued",
-  "settledBy", "evidence", "via", "role", "mediaType", "mimeType",
-  "id", "sessionId", "spanId", "requestId", "responseTo", "inputId", "turnId",
-  "nativeMessageId", "messageId", "callId", "toolCallId", "compactionId", "taskId", "parent", "child",
-]);
-const ID_LIST_FIELDS = new Set(["agentPath", "inputIds", "carries"]);
-const CONTENT_FIELD_NAMES = new Set([
-  "native", "events", "body", "input", "output", "outputDelta", "result", "reason", "message", "cause", "text", "data",
-  "outcome", "model", "credential", "structuredOutput", "update", "arguments", "rawInput", "rawOutput", "content",
-  "usage", "tokens", "context", "metadata", "_meta", "header", "config", "error", "tool", "toolName", "server", "name",
-]);
-const OPAQUE_CONTENT = new Set(["arguments", "rawInput", "rawOutput", "structuredOutput", "cause", "metadata", "_meta", "value"]);
-const JSON_STRING = /"(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/gu;
-
-/** dsh's native arguments carry serialized JSON. Replace only JSON strings. */
-function redactSerializedArguments(text: string, redact: (text: string) => string): string | undefined {
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return undefined; }
-  if (parsed === null || typeof parsed !== "object") return undefined;
-  return text.replace(JSON_STRING, (literal) => {
-    const value = JSON.parse(literal) as string;
-    const sanitized = redact(value);
-    return sanitized === value ? literal : JSON.stringify(sanitized);
-  });
-}
-
-function preservesStructure(key: string, value: unknown, owner: object, path: readonly string[]): boolean {
-  if (path.some(segment => OPAQUE_CONTENT.has(segment))) return false;
-  if (Array.isArray(value)) return ID_LIST_FIELDS.has(key) && value.every(item => typeof item === "string");
-  if (typeof value !== "string") return false;
-  const kind = Object.getOwnPropertyDescriptor(owner, "kind")?.value;
-  return STRUCTURAL_FIELDS.has(key)
-    || (key === "result" && kind === "tool_call_ended" && (value === "ok" || value === "failed"))
-    || (key === "outcome" && kind === "compaction_ended" && (value === "completed" || value === "aborted" || value === "failed"))
-    || (key === "model" && kind === "model")
-    || ((key === "tool" || key === "server" || key === "toolName") && kind === "tool_call_started")
-    || (key === "reason" && (kind === "released" || kind === "input_dropped"))
-    || (key === "credential" && (value === "missing" || value === "rejected"));
-}
-
 function credentialValue(value: string | null | undefined): value is string {
   return typeof value === "string" && value.length >= CREDENTIAL_MIN_LENGTH && !PATH_VALUE.test(value);
 }
@@ -75,7 +31,7 @@ export interface CredentialRedactor {
   /** BYOK change: suppress an echoed image payload from records and control errors. */
   addImage(this: void, data: string): void;
   redact(this: void, text: string): string;
-  redactValue<T>(this: void, value: T): T;
+  redactValue<T>(this: void, value: T, jsonField?: (path: RedactionPath) => boolean): T;
 }
 
 /** Explicit session credentials only; runtime-native keys can be added after SDK resolution. */
@@ -111,16 +67,6 @@ export function sessionCredentialRedactor(options: Partial<SessionOptions>): Cre
       values = [...known].toSorted((left, right) => right.length - left.length);
     }
   };
-  const shape = {
-    preserve: preservesStructure,
-    text: (text: string, path: readonly string[]) => path.at(-1) === "arguments" ? redactSerializedArguments(text, redact) : undefined,
-    // Protocol fields keep their names. A known credential used as a dynamic
-    // property name still cannot enter retained diagnostic data.
-    key: (key: string, path: readonly string[]) => {
-      if (path.some(segment => OPAQUE_CONTENT.has(segment))) return redact(key);
-      return STRUCTURAL_FIELDS.has(key) || ID_LIST_FIELDS.has(key) || CONTENT_FIELD_NAMES.has(key) ? key : redact(key);
-    },
-  };
   return {
     values: () => values,
     add(value) {
@@ -131,9 +77,6 @@ export function sessionCredentialRedactor(options: Partial<SessionOptions>): Cre
       if (data.length !== 0) images.add(data);
     },
     redact,
-    // Most records contain no credentials. Avoid traversing at all without known
-    // values, and preserve the original object when the scan finds no match.
-    redactValue: (value) => values.length === 0 && images.size === 0 ? value : redactText(value, redact, (text) =>
-      values.some((knownValue) => text.includes(knownValue)) || [...images].some((data) => text.includes(data)), shape),
+    redactValue: (value, jsonField) => values.length === 0 && images.size === 0 ? value : redactText(value, redact, jsonField),
   };
 }
