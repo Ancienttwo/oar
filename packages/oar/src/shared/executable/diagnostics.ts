@@ -1,4 +1,4 @@
-import type { ExecutableResult } from "./run.js";
+// BYOK change: process-table diagnostics do not require the executable launcher (Apache-2.0).
 import { cleanupFailureReason, type ProcessCleanupDiagnostics } from "./process-cleanup.js";
 
 export interface ProcessExitObservation {
@@ -133,7 +133,7 @@ export function processFailure(context: string, diagnostics: ProcessDiagnostics)
  * and a bounded stderr tail. A command that exited with a code returns; that
  * answer is the caller's to read.
  */
-export function assertRan(result: ExecutableResult, context: string): void {
+export function assertRan(result: { readonly ok: boolean; readonly exitCode: number | null; readonly stderr: string; readonly diagnostics?: ProcessDiagnostics }, context: string): void {
   if (!result.ok && (result.exitCode === null || result.diagnostics?.timeoutMs !== undefined)) {
     throw processFailure(context, result.diagnostics ?? {
       exitCode: result.exitCode, signal: null, stderr: stderrTail(result.stderr),
