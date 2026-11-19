@@ -112,45 +112,39 @@ export async function callAppServer(
     aborted: false,
   };
   try {
-    return await withQueryDeadline("Codex account request", timeoutMs, async (signal): Promise<ReadOutcome> => {
-      const client = startAppServerClient(options.spawn, command, options.env, {}, undefined, { redact: options.redact });
+    return await withQueryDeadline("Codex account request", timeoutMs, async (signal, own): Promise<ReadOutcome> => {
+      const client = own(startAppServerClient(options.spawn, command, options.env, {}, undefined, { redact: options.redact }));
       client.handle({ onNotification: () => {}, onServerRequest: () => {} });
-      const stop = (): void => { state.aborted = true; client.kill(); };
-      signal.addEventListener("abort", stop, { once: true });
+      signal.addEventListener("abort", () => { state.aborted = true; }, { once: true });
+      await client.spawned;
+      signal.throwIfAborted();
+      await client.request("initialize", {
+        clientInfo: { name: "oar", version: "0.0.0" },
+        capabilities: { experimentalApi: true },
+      });
+      signal.throwIfAborted();
+      client.notify("initialized", {});
+
+      // Read auth mode before the ChatGPT-only account endpoints. In API-key
+      // mode that endpoint rejects with "ChatGPT authentication required" even
+      // though Codex itself is correctly authenticated; treating that as expired
+      // OAuth would tell the user to perform a login that cannot fix the state.
+      let account: unknown = undefined;
       try {
-        await client.spawned;
-        signal.throwIfAborted();
-        await client.request("initialize", {
-          clientInfo: { name: "oar", version: "0.0.0" },
-          capabilities: { experimentalApi: true },
-        });
-        signal.throwIfAborted();
-        client.notify("initialized", {});
-
-        // Read auth mode before the ChatGPT-only account endpoints. In API-key
-        // mode that endpoint rejects with "ChatGPT authentication required" even
-        // though Codex itself is correctly authenticated; treating that as expired
-        // OAuth would tell the user to perform a login that cannot fix the state.
-        let account: unknown = undefined;
-        try {
-          account = await client.request("account/read", {});
-        } catch {
-          // Older app-servers may not expose account/read. Preserve the existing
-          // rate-limit read in that case instead of making identity mandatory.
-        }
-        signal.throwIfAborted();
-        if (isNonSubscriptionAccount(account)) {
-          return { kind: "unsupported", reason: "unsupported_auth_mode" };
-        }
-
-        state.inAccountCall = true;
-        const result = await request(client, call, signal, (outcome) => { state.callOutcome = outcome; });
-        return { kind: "ok", result, email: accountEmail(account) };
-      } finally {
-        signal.removeEventListener("abort", stop);
-        client.kill();
+        account = await client.request("account/read", {});
+      } catch {
+        // Older app-servers may not expose account/read. Preserve the existing
+        // rate-limit read in that case instead of making identity mandatory.
       }
-    });
+      signal.throwIfAborted();
+      if (isNonSubscriptionAccount(account)) {
+        return { kind: "unsupported", reason: "unsupported_auth_mode" };
+      }
+
+      state.inAccountCall = true;
+      const result = await request(client, call, signal, (outcome) => { state.callOutcome = outcome; });
+      return { kind: "ok", result, email: accountEmail(account) };
+    }, undefined, options.signal);
   } catch (error) {
     if (error instanceof RangeError) { throw error; }
     if (!state.inAccountCall || state.aborted) { return { kind: "error", cause: error }; }
