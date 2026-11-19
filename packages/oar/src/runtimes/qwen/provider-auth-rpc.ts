@@ -29,7 +29,7 @@ function providerResponse(value: unknown, pending: Set<string | number>, redact:
   }
   if (!("result" in row)) { return undefined; }
   pending.delete(id);
-  return { jsonrpc: "2.0", id, result: redactText(row.result, redact, (text) => redact(text) !== text) };
+  return { jsonrpc: "2.0", id, result: redactText(row.result, redact) };
 }
 
 function provider(value: unknown): QwenProvider {
@@ -87,7 +87,7 @@ export function qwenProviderAuth(installation: ExecutableInstallation, options: 
       }, sendOptions));
       if (Date.now() >= until) { throw new QwenProviderAuthError("timeout", method); }
       const result = await withAcpDeadline(opened, method, until - Date.now(), (sendOptions) => opened.connection.agent.request(method, params, sendOptions));
-      return redactText(result, redact, (text) => [...secrets].some((key) => text.includes(key)));
+      return redactText(result, redact);
     } catch (error) { throw failure(error, method); }
     finally { if (child !== undefined) { child.kill(); await child.exited; } }
   };
