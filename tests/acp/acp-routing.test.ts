@@ -199,6 +199,38 @@ test("credential union replaces overlapping values longest first, including dyna
 });
 
 
+test("unowned routing diagnostics withhold fragments and redact registered image values", () => {
+  const f = fixture({ maxFrames: 0 });
+  const credentials = sessionCredentialRedactor({ env: { API_KEY: "fixture-token" } });
+  f.router.attach("credential-owner", credentials);
+  credentials.addImage("synthetic-image-payload");
+  for (const text of ["fixture-", "token"]) {
+    f.router.notify("session/update", { sessionId: "unowned", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } }, () => {});
+  }
+  f.router.notify("session/update", { sessionId: "unowned", update: { sessionUpdate: "available_commands_update", note: "echo synthetic-image-payload" } }, () => {});
+  expect(f.diagnostics.slice(0, 2).map(entry => entry.params)).toEqual(Array.from({ length: 2 }, () => ({
+    sessionId: "unowned", update: { sessionUpdate: "user_message_chunk" },
+  })));
+  expect(f.diagnostics.at(-1)?.params).toHaveProperty("update.note", "echo [redacted]");
+  credentials.addExplicit("rawOutput");
+  f.router.notify("session/update", { sessionId: "unowned", update: { sessionUpdate: "tool_call_update", rawOutput: "fragment", note: "private sibling" } }, () => {});
+  expect(f.diagnostics.at(-1)?.params).toHaveProperty("update", "[redacted]");
+  f.router.close();
+});
+
+test("unowned routing diagnostics withhold a marker-keyed object", async () => {
+  vi.useFakeTimers();
+  const f = fixture({ waitMs: 20 });
+  f.router.attach("credential-owner", sessionCredentialRedactor({ env: { API_KEY: "[redacted]" } }));
+  const params = { sessionId: "unowned", update: { "[redacted]": true, text: "private sibling" } };
+  f.router.ingress(params);
+  f.router.notify("session/update", params, () => { throw new Error("unowned frame delivered"); });
+  await vi.advanceTimersByTimeAsync(20);
+  expect(f.diagnostics.at(-1)).toMatchObject({ reason: "expired", params: { update: "[redacted]" } });
+  expect(JSON.stringify(f.diagnostics)).not.toContain("private sibling");
+  f.router.close();
+});
+
 test("wire traffic arriving before resume is refused even when SDK dispatch follows reservation", async () => {
   const f = fixture();
   const params = { sessionId: "old-root", text: "queued-in-sdk" }; f.router.ingress(params);

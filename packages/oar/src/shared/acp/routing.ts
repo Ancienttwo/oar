@@ -1,7 +1,7 @@
 import { RequestError, type JsonRpcId } from "@agentclientprotocol/sdk";
 import { UnsupportedOptionError } from "../../contracts/errors.js";
 import { SessionUnavailableError } from "../../contracts/session-unavailable-error.js";
-import type { CredentialRedactor } from "../credential-redactor.js";
+import { sessionCredentialRedactor, type CredentialRedactor } from "../credential-redactor.js";
 import { asRecord, type JsonRecord } from "../json.js";
 import { redactText } from "../redact-text.js";
 import { redactTokenShapes } from "../token-redaction.js";
@@ -30,6 +30,18 @@ interface Pending<T> {
 
 function beforeReservation<T>(owner: Owner<T>, position: number): boolean { return owner.reserved !== null && position < owner.reserved; }
 
+function diagnosticParams(original: unknown, sanitized: unknown): unknown {
+  const packet = asRecord(sanitized);
+  const update = asRecord(packet?.update);
+  const type = asRecord(asRecord(original)?.update)?.sessionUpdate;
+  if (update !== null && (type === "user_message_chunk" || type === "agent_message_chunk" || type === "agent_thought_chunk"
+    || type === "tool_call" || type === "tool_call_update")) {
+    const { content: _content, rawOutput: _rawOutput, ...rest } = update;
+    return { ...packet, update: rest };
+  }
+  return sanitized;
+}
+
 /** Connection-local ownership, independent of sessions' kernels and native request-id allocation. */
 export function createAcpRouting<T>(options: {
   readonly associations?: (method: string, params: JsonRecord) => readonly AcpAssociation[];
@@ -46,7 +58,7 @@ export function createAcpRouting<T>(options: {
   const owners = new Set<Owner<T>>();
   // Native work may outlive disposal. Retain only redactors, not session targets, until exit.
   const redactors = new Map<CredentialRedactor, readonly string[]>();
-  let credentialValues: readonly string[] = [];
+  let combined = sessionCredentialRedactor({});
   let credentialsChanged = false;
   const ids = new Map<string, Owner<T> | null>();
   const parents = new Map<string, Set<string>>();
@@ -59,21 +71,30 @@ export function createAcpRouting<T>(options: {
   let sequence = 0;
   let bytes = 0;
   let closed = false;
-  const redact = (text: string): string => {
+  const refreshCredentials = (): void => {
     // Merge before replacing: a shorter peer credential must not expose the tail of a longer one.
     for (const [credentials, previous] of redactors) {
       const values = credentials.values();
       if (values !== previous) { redactors.set(credentials, values); credentialsChanged = true; }
     }
     if (credentialsChanged) {
-      credentialValues = [...new Set([...redactors.values()].flat())].toSorted((a, b) => b.length - a.length);
+      combined = sessionCredentialRedactor({});
+      for (const values of redactors.values()) for (const value of values) combined.addExplicit(value);
       credentialsChanged = false;
     }
-    return redactTokenShapes(credentialValues.reduce((result, value) => result.replaceAll(value, "[redacted]"), text));
   };
-  const safe = <V>(value: V): V => redactText(value, redact);
+  const redact = (text: string): string => { refreshCredentials(); return redactTokenShapes(combined.redact(text)); };
+  const safe = <V>(value: V): V => {
+    refreshCredentials();
+    return redactText(value, text => redactTokenShapes(combined.redact(text)), undefined, undefined,
+      text => combined.matches(text) || redactTokenShapes(text) !== text);
+  };
   const report = (entry: Omit<AcpUnattributed, "reason">, reason: AcpUnattributed["reason"]): void => {
-    try { options.diagnostic(safe({ ...entry, reason })); } catch { /* Observer failure is isolated. */ }
+    try {
+      const sanitized = safe({ ...entry, reason });
+      const params = combined.hasProtectedValues() ? diagnosticParams(entry.params, sanitized.params) : sanitized.params;
+      options.diagnostic(typeof sanitized === "object" ? { ...sanitized, params } : sanitized);
+    } catch { /* Observer failure is isolated. */ }
   };
   const remove = (entry: Pending<T>): void => {
     pending.delete(entry); bytes -= entry.bytes;
@@ -183,7 +204,7 @@ export function createAcpRouting<T>(options: {
     if (requestId !== undefined) { requestIngress.delete(requestId); }
     const receivedAt = metadata?.time ?? Date.now();
     const frameSequence = metadata?.sequence ?? ++sequence;
-    const diagnostic = safe({ method, params, receivedAt });
+    const diagnostic = { method, params, receivedAt };
     if (closed) { report(diagnostic, "connection_closed"); refuse("connection_closed"); return; }
     const defaultId = typeof record?.sessionId === "string" ? record.sessionId : null;
     const id = record === null || options.sessionId === undefined ? defaultId : options.sessionId(method, record);
