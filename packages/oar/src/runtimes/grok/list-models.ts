@@ -9,6 +9,7 @@ import {
   RequestError,
 } from "@agentclientprotocol/sdk";
 import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
+import { withQueryDeadline, type OwnQueryProcess } from "../../shared/executable/query.js";
 import { startAcpProcess, withAcpDeadline } from "../../shared/acp/process.js";
 import { effortLevelOf, effortLevelsOf } from "../../shared/effort-levels.js";
 import { asRecord, asRecordList, type JsonRecord } from "../../shared/json.js";
@@ -88,58 +89,53 @@ export function projectGrokModels(state: unknown): ModelEntry[] {
   return entries;
 }
 
-async function readModelState(command: string, cwd: string, timeoutMs: number, options: OwnedReaderOptions): Promise<JsonRecord> {
-  const runtime = startAcpProcess(
+async function readModelState(command: string, cwd: string, timeoutMs: number, options: OwnedReaderOptions, own: OwnQueryProcess): Promise<JsonRecord> {
+  const runtime = own(startAcpProcess(
     options.spawn, command,
     ["agent", "--always-approve", "--no-leader", "stdio"],
     createClient({ name: "oar" }),
     { cwd, env: options.env, redact: options.redact },
+  ));
+  const initialize = methods.agent.initialize;
+  const response = await withAcpDeadline(
+    runtime,
+    initialize,
+    timeoutMs,
+    (requestOptions) => runtime.connection.agent.request(initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+      },
+      clientInfo: { name: "oar", version: "0.0.0" },
+      _meta: grokInitializeMeta({ cwd }),
+    }, requestOptions),
   );
-  try {
-    const initialize = methods.agent.initialize;
-    const response = await withAcpDeadline(
+  const method = selectGrokAuthMethod(asRecord(response) ?? {});
+  if (method !== undefined) {
+    const authenticate = methods.agent.authenticate;
+    await withAcpDeadline(
       runtime,
-      initialize,
+      authenticate,
       timeoutMs,
-      (requestOptions) => runtime.connection.agent.request(initialize, {
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-        },
-        clientInfo: { name: "oar", version: "0.0.0" },
-        _meta: grokInitializeMeta({ cwd }),
-      }, requestOptions),
-    );
-    const method = selectGrokAuthMethod(asRecord(response) ?? {});
-    if (method !== undefined) {
-      const authenticate = methods.agent.authenticate;
-      await withAcpDeadline(
-        runtime,
+      (requestOptions) => runtime.connection.agent.request(
         authenticate,
-        timeoutMs,
-        (requestOptions) => runtime.connection.agent.request(
-          authenticate,
-          { methodId: method },
-          requestOptions,
-        ),
-      );
-    }
-    const result = await withAcpDeadline(
-      runtime,
-      "_x.ai/models/list",
-      timeoutMs,
-      (requestOptions) => runtime.connection.agent.request<JsonRecord>(
-        "_x.ai/models/list",
-        {},
+        { methodId: method },
         requestOptions,
       ),
     );
-    return grokModelState(result);
-  } finally {
-    runtime.kill();
-    await runtime.exited;
   }
+  const result = await withAcpDeadline(
+    runtime,
+    "_x.ai/models/list",
+    timeoutMs,
+    (requestOptions) => runtime.connection.agent.request<JsonRecord>(
+      "_x.ai/models/list",
+      {},
+      requestOptions,
+    ),
+  );
+  return grokModelState(result);
 }
 
 export async function grokListModels(installation: AvailableInstallation, options: OwnedReaderOptions): Promise<ListModelsResult> {
@@ -147,7 +143,8 @@ export async function grokListModels(installation: AvailableInstallation, option
     return { kind: "unsupported", reason: "grok model listing requires the grok executable" };
   }
   try {
-    const state = await readModelState(installation.command, listingCwd(options), options.timeoutMs, options);
+    const state = await withQueryDeadline("Grok model listing", options.timeoutMs, (_signal, own) =>
+      readModelState(installation.command, listingCwd(options), options.timeoutMs, options, own), undefined, options.signal);
     return { kind: "ok", models: projectGrokModels(state) };
   } catch (error) {
     if (error instanceof RequestError) {

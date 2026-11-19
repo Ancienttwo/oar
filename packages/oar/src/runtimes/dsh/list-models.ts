@@ -1,4 +1,5 @@
 // BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import { withQueryDeadline } from "../../shared/executable/query.js";
 import type { OwnedReaderOptions } from "../../contracts/list-models.js";
 import type { AvailableInstallation } from "../../contracts/installation.js";
 import type { ModelEntry, ListModelsResult } from "../../contracts/list-models.js";
@@ -62,18 +63,18 @@ export async function dshListModels(installation: AvailableInstallation, options
   if (installation.via !== "executable") { return { kind: "unsupported", reason: "DSH model listing requires its executable" }; }
   const refusal = dshVersionUnsupported(installation.version);
   if (refusal !== null) { return refusal; }
-  const { child, profileReady } = await launchDsh(options.spawn, installation.command, launch);
-  const control = dshControl(child, () => {});
-  try {
-    await control.ready;
-    profileReady();
-    const catalog = await control.request("models", {}, options.timeoutMs);
-    return dshCatalogResult(catalog);
-  } catch (error) {
-    if (error instanceof DshCommandError && error.code === "native_method_unavailable") { return { kind: "unsupported", reason: "DSH does not expose its native model catalog" }; }
-    throw error;
-  } finally {
-    child.kill();
-    await child.exited;
-  }
+  return withQueryDeadline("DSH model listing", options.timeoutMs, async (_signal, own) => {
+    const { child, profileReady } = await launchDsh(options.spawn, installation.command, launch);
+    own(child);
+    const control = dshControl(child, () => {});
+    try {
+      await control.ready;
+      profileReady();
+      const catalog = await control.request("models", {}, options.timeoutMs);
+      return dshCatalogResult(catalog);
+    } catch (error) {
+      if (error instanceof DshCommandError && error.code === "native_method_unavailable") { return { kind: "unsupported", reason: "DSH does not expose its native model catalog" }; }
+      throw error;
+    }
+  }, undefined, options.signal);
 }
