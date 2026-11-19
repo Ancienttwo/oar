@@ -19,13 +19,10 @@ function guard<Args extends unknown[], Result>(method: (...args: Args) => Promis
 
 /** Credentials supplied for this session, plus native keys the adapter resolves. No inherited environment or credential-file scan. */
 function sessionCredentials(options: SessionOptions, context: SessionOpenContext): SessionCredentials {
-  const { add, addImage, redact, redactValue, values } = sessionCredentialRedactor(options);
+  const redactor = sessionCredentialRedactor(options);
+  const { redactValue } = redactor;
   return {
-    add,
-    addImage,
-    values,
-    redact,
-    redactValue,
+    ...redactor,
     kernel: (id, extraRedact) => { const kernel = createSessionKernel(id, extraRedact ?? redactValue, options.retainedBytes); kernel.opened(context); return kernel; },
     seal: (adapter, clean = redactValue) => sealSession({
       ...adapter,

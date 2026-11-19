@@ -165,7 +165,7 @@ test("native turn ends map without inventing a clean end", () => {
   expect(dshTurnOutcome({ kind: "max-tokens" })).toMatchObject({ kind: "failed", failure: "limit_reached" });
   expect(dshTurnOutcome({ kind: "blocked" })).toMatchObject({ kind: "failed", failure: "unknown" });
   expect(dshTurnOutcome({ kind: "interrupted" })).toMatchObject({ kind: "failed", failure: "runtime_exited" });
-  expect(dshTurnOutcome({ kind: "from-a-later-release" })).toEqual({ kind: "failed", failure: "unknown", reason: 'DSH ended the turn with "from-a-later-release"' });
+  expect(dshTurnOutcome({ kind: "from-a-later-release" })).toEqual({ kind: "failed", failure: "unknown", reason: 'DSH ended the turn with from-a-later-release' });
   expect(dshTurnOutcome(null)).toMatchObject({ kind: "failed", failure: "unknown" });
 });
 
