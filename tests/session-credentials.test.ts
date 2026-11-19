@@ -79,6 +79,22 @@ test.each(["failed", "turn_", "kind", "type", "auth"])("redacts the resolved key
   expect(kernel.records()).toEqual([frame]);
 });
 
+test("redacts free-form native results and dynamic keys without changing the typed model route", () => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit("deepseek");
+  const kernel = createSessionKernel("session", credentials.redactValue);
+  const frame = kernel.frame({
+    type: "result/error_during_execution",
+    native: { type: "result", result: "upstream echoed deepseek", deepseek: "deepseek" },
+    events: [{ kind: "model", model: "deepseek/model" }],
+  });
+  expect(frame.body).toEqual({
+    type: "result/error_during_execution",
+    native: { type: "result", result: "upstream echoed [redacted]", "[redacted]": "[redacted]" },
+    events: [{ kind: "model", model: "deepseek/model" }],
+  });
+});
+
 test("opening failures redact frozen native Error fields and cause data while preserving their class", async () => {
   const native: RuntimeFailureError = Object.freeze(new RuntimeFailureError("auth", secret, { cause: { message: secret, nested: [secret] } }));
   const open = withSessionCredentials(async () => { throw native; });
