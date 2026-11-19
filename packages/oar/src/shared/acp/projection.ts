@@ -37,20 +37,19 @@ export function createAcpProjectionState(): AcpProjectionState {
   return { tools: new Map() };
 }
 
-function textContent(value: unknown): string | null {
+function textContent(value: unknown, source: unknown = value): string | null {
   const content = asRecord(value);
-  if (content !== null && typeof content.text === "string") {
-    return content.text;
-  }
+  const original = asRecord(source);
+  if (typeof content?.text === "string" && typeof original?.text === "string") return original.text;
   // An ACP ToolCallContent of type "content" wraps a ContentBlock (grok's
   // completed `run_terminal_command`: `[{type: "content", content: {type:
   // "text", text}}]`); its text is the call's readable output.
-  if (content !== null && content.type === "content") {
-    return textContent(content.content);
+  if (original?.type === "content" && content !== null) {
+    return textContent(content.content, original.content);
   }
-  if (Array.isArray(value)) {
+  if (Array.isArray(value) && Array.isArray(source)) {
     const parts = value
-      .map((item) => textContent(item))
+      .map((item, index) => textContent(item, source[index]))
       .filter((item): item is string => item !== null);
     return parts.length === 0 ? null : parts.join("\n");
   }
@@ -76,9 +75,18 @@ function inputDetail(value: unknown): string | undefined {
   }
 }
 
-function outputDetail(value: unknown): string | undefined {
-  const text = textContent(value) ?? inputDetail(value);
-  return text === undefined ? undefined : truncate(text);
+export function acpToolProgressOutput(value: unknown, mapText: (text: string) => string = text => text, source: unknown = value): string | undefined {
+  const text = typeof value === "string" && typeof source === "string" ? source : textContent(value, source);
+  const output = text === null ? inputDetail(value) : mapText(text);
+  return output === undefined ? undefined : truncate(output);
+}
+
+export function acpToolTerminalContent(content: unknown, rawOutput: unknown, rawToolOutput?: AcpRawToolOutputReader, status?: unknown): readonly ToolOutputPart[] | undefined {
+  const parts = toolContent(content, (item: unknown) => {
+    const wrapper = asRecord(item);
+    return wrapper?.type === "content" ? wrapper.content : item;
+  }) ?? rawToolOutput?.(rawOutput, status) ?? toolContent(rawOutput);
+  return parts?.map(part => part.type === "text" ? { type: "text", text: truncate(part.text) } : part);
 }
 
 function toolName(update: JsonRecord): string {
@@ -136,7 +144,7 @@ function projectTool(state: AcpProjectionState, update: JsonRecord, rawToolOutpu
     // A later non-terminal update with rawOutput is streamed output. `content`
     // is NOT used here: kimi streams the call's ARGUMENTS as content while
     // in_progress (wire-shapes test), which is input, not output.
-    const output = outputDetail(update.rawOutput);
+    const output = acpToolProgressOutput(update.rawOutput);
     events.push({ kind: "tool_call_progress", callId, ...(output === undefined ? {} : { output }) });
   }
   if (!tool.ended && terminal) {
@@ -144,11 +152,7 @@ function projectTool(state: AcpProjectionState, update: JsonRecord, rawToolOutpu
     // `content` is what the runtime wants shown (grok's bash text; kimi's
     // terminal reference); each ToolCallContent wraps its ContentBlock as
     // `{type: "content", content}`. Without content, `rawOutput` is the result.
-    const unwrapped = toolContent(update.content, (item: unknown) => {
-      const wrapper = asRecord(item);
-      return wrapper?.type === "content" ? wrapper.content : item;
-    }) ?? rawToolOutput?.(update.rawOutput, update.status) ?? toolContent(update.rawOutput);
-    const content = unwrapped?.map((part) => (part.type === "text" ? { type: "text" as const, text: truncate(part.text) } : part));
+    const content = acpToolTerminalContent(update.content, update.rawOutput, rawToolOutput, update.status);
     let result: "ok" | "failed" | undefined = undefined;
     if (update.status === "completed") {
       result = "ok";
