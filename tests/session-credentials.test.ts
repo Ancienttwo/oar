@@ -85,14 +85,21 @@ test("redacts free-form native results and dynamic keys without changing the typ
   const kernel = createSessionKernel("session", credentials.redactValue);
   const frame = kernel.frame({
     type: "result/error_during_execution",
-    native: { type: "result", result: "upstream echoed deepseek", deepseek: "deepseek" },
+    native: { type: "result", result: "upstream echoed deepseek", "meta-deepseek": "deepseek", update: { rawInput: { status: "deepseek", id: "deepseek", code: "deepseek" } } },
     events: [{ kind: "model", model: "deepseek/model" }],
   });
   expect(frame.body).toEqual({
     type: "result/error_during_execution",
-    native: { type: "result", result: "upstream echoed [redacted]", "[redacted]": "[redacted]" },
+    native: { type: "result", result: "upstream echoed [redacted]", "meta-[redacted]": "[redacted]", update: { rawInput: { status: "[redacted]", id: "[redacted]", code: "[redacted]" } } },
     events: [{ kind: "model", model: "deepseek/model" }],
   });
+});
+
+test("keeps a native tool argument field while redacting matching payload text", () => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit("arguments");
+  const native = { data: { arguments: '{"text":"arguments"}' } };
+  expect(credentials.redactValue(native)).toEqual({ data: { arguments: '{"text":"[redacted]"}' } });
 });
 
 test("opening failures redact frozen native Error fields and cause data while preserving their class", async () => {
