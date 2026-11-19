@@ -59,6 +59,26 @@ test("redacts before retention and delivery, while control receives original inp
   expect(native[secret].secret).toBe(secret);
 });
 
+test.each(["failed", "turn_", "kind", "type", "auth"])("redacts the resolved key %s from content while preserving protocol structure", (key) => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit(key);
+  const kernel = createSessionKernel("session", credentials.redactValue);
+  const live: RawEvent[] = [];
+  kernel.rawEvents(record => { live.push(record); });
+  const frame = kernel.frame({
+    type: "native/turn_failed",
+    native: { type: "failed", status: "failed", message: `provider rejected ${key}` },
+    events: [{ kind: "turn_ended", outcome: { kind: "failed", failure: "auth", credential: "rejected", reason: `provider rejected ${key}` } }],
+  });
+  expect(frame.body).toEqual({
+    type: "native/turn_failed",
+    native: { type: "failed", status: "failed", message: "provider rejected [redacted]" },
+    events: [{ kind: "turn_ended", outcome: { kind: "failed", failure: "auth", credential: "rejected", reason: "provider rejected [redacted]" } }],
+  });
+  expect(live).toEqual([frame]);
+  expect(kernel.records()).toEqual([frame]);
+});
+
 test("opening failures redact frozen native Error fields and cause data while preserving their class", async () => {
   const native: RuntimeFailureError = Object.freeze(new RuntimeFailureError("auth", secret, { cause: { message: secret, nested: [secret] } }));
   const open = withSessionCredentials(async () => { throw native; });
