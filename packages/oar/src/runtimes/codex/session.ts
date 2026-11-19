@@ -463,9 +463,8 @@ async function openCodexSession(
     graph: () => kernel.graph(),
     dispose: guard(() => kernel.dispose(async () => {
       client.kill();
-      // Wait for the process and its isolated turn cleanup to release their resources.
+      // Wait for release of the process and its resources. Turn cleanup is synchronous.
       await client.exited;
-      await turnProcesses.settled();
     })),
   };
   return session;
