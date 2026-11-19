@@ -102,6 +102,26 @@ test("keeps a native tool argument field while redacting matching payload text",
   expect(credentials.redactValue(native)).toEqual({ data: { arguments: '{"text":"[redacted]"}' } });
 });
 
+test("redacts ACP extension metadata before retention and observer delivery", () => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit(secret);
+  const kernel = createSessionKernel("session", credentials.redactValue);
+  const live: RawEvent[] = [];
+  kernel.rawEvents(record => { live.push(record); });
+  kernel.frame({ type: "tool_call_update", events: [], native: { update: { _meta: { extension: { status: secret } } } } });
+  const native = { update: { _meta: { extension: { status: "[redacted]" } } } };
+  expect(kernel.records()).toEqual([expect.objectContaining({ body: expect.objectContaining({ native }) })]);
+  expect(live).toEqual(kernel.records());
+});
+
+test("redacts dsh argument strings without rewriting JSON literals", () => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit("true");
+  const native = { data: { arguments: String.raw`{"force":true,"message":"tr\u0075e","n":3,"x":null}` } };
+  const sanitized = credentials.redactValue(native);
+  expect(sanitized.data.arguments).toBe('{"force":true,"message":"[redacted]","n":3,"x":null}');
+});
+
 test("opening failures redact frozen native Error fields and cause data while preserving their class", async () => {
   const native: RuntimeFailureError = Object.freeze(new RuntimeFailureError("auth", secret, { cause: { message: secret, nested: [secret] } }));
   const open = withSessionCredentials(async () => { throw native; });
