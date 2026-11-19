@@ -63,7 +63,7 @@ export async function codexSession(
   spawnLineProcess: SpawnLineProcess,
   installation: AvailableInstallation,
   // BYOK change: the caller passes the complete filtered environment, so a value is never a null removal.
-  options: Omit<SessionOptions, "env" | "goals"> & {
+  options: Omit<SessionOptions, "env" | "goals" | "fork"> & {
     readonly env?: Readonly<Record<string, string>>;
     readonly approvalPolicy?: "never" | "on-request"; // BYOK change: explicit local interactive opt-in.
     // BYOK change: the caller passes OAR_CODEX_SANDBOX semantics explicitly.
