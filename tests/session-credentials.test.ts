@@ -4,6 +4,7 @@ import { expect, test } from "vitest";
 import { mcpCredentialRedactor } from "../packages/oar/src/shared/mcp-servers.js";
 import { readEnvironmentCredential, rememberEnvironmentCredentials, sessionCredentialRedactor } from "../packages/oar/src/shared/credential-redactor.js";
 import { withSessionCredentials } from "../packages/oar/src/shared/session-credentials.js";
+import { foldDsh, initialDshProjection, redactDshRecord } from "../packages/oar/src/runtimes/dsh/projection.js";
 import { createSessionKernel } from "../packages/oar/src/shared/session-kernel.js";
 import { RuntimeFailureError } from "../packages/oar/src/contracts/runtime-failure-error.js";
 import type { RawEvent } from "../packages/oar/src/contracts/session.js";
@@ -55,51 +56,53 @@ test("redacts before retention and delivery, while control receives original inp
     expect(JSON.stringify(value)).not.toContain(secret);
     expect(inspect(value, { depth: null })).not.toContain(secret);
   }
-  expect(JSON.stringify(live)).toContain("/workspace/safe-path");
+  expect(live.at(-1)).toMatchObject({ body: { native: "[redacted]" } });
   expect(native[secret].secret).toBe(secret);
 });
 
-test.each(["failed", "turn_", "kind", "type", "auth"])("redacts the resolved key %s from content while preserving protocol structure", (key) => {
+test("dsh projects the sanitized arguments, including escaped and nested values", () => {
   const credentials = sessionCredentialRedactor({});
-  credentials.addExplicit(key);
-  const kernel = createSessionKernel("session", credentials.redactValue);
-  const live: RawEvent[] = [];
-  kernel.rawEvents(record => { live.push(record); });
-  const frame = kernel.frame({
-    type: "native/turn_failed",
-    native: { type: "failed", status: "failed", message: `provider rejected ${key}` },
-    events: [{ kind: "turn_ended", outcome: { kind: "failed", failure: "auth", credential: "rejected", reason: `provider rejected ${key}` } }],
-  });
-  expect(frame.body).toEqual({
-    type: "native/turn_failed",
-    native: { type: "failed", status: "failed", message: "provider rejected [redacted]" },
-    events: [{ kind: "turn_ended", outcome: { kind: "failed", failure: "auth", credential: "rejected", reason: "provider rejected [redacted]" } }],
-  });
-  expect(live).toEqual([frame]);
-  expect(kernel.records()).toEqual([frame]);
+  credentials.addExplicit("true");
+  const text = String.raw`{"force":true,"id":9007199254740993,"nested":{"message":"tr\u0075e"}}`;
+  const kernel = createSessionKernel("root", record => redactDshRecord(record, credentials));
+  const folded = foldDsh(initialDshProjection("root"), { type: "native", channel: "session/event", event: {
+    type: "tool/call", data: { callId: "c", name: "demo", arguments: text },
+  } });
+  const frame = kernel.frame(folded.frame.body);
+  const expected = '{"force":true,"id":9007199254740993,"nested":{"message":"[redacted]"}}';
+  expect(frame.body.native).toMatchObject({ data: { arguments: expected } });
+  expect(frame.body.events[0]).toMatchObject({ input: expected });
 });
 
-test("redacts free-form native results and dynamic keys without changing the typed model route", () => {
+test("redacts encoded arguments inside a native dsh assistant message", () => {
   const credentials = sessionCredentialRedactor({});
-  credentials.addExplicit("deepseek");
-  const kernel = createSessionKernel("session", credentials.redactValue);
-  const frame = kernel.frame({
-    type: "result/error_during_execution",
-    native: { type: "result", result: "upstream echoed deepseek", "meta-deepseek": "deepseek", update: { rawInput: { status: "deepseek", id: "deepseek", code: "deepseek" } } },
-    events: [{ kind: "model", model: "deepseek/model" }],
-  });
-  expect(frame.body).toEqual({
-    type: "result/error_during_execution",
-    native: { type: "result", result: "upstream echoed [redacted]", "meta-[redacted]": "[redacted]", update: { rawInput: { status: "[redacted]", id: "[redacted]", code: "[redacted]" } } },
-    events: [{ kind: "model", model: "deepseek/model" }],
-  });
+  credentials.addExplicit(secret);
+  const kernel = createSessionKernel("root", record => redactDshRecord(record, credentials));
+  const frame = kernel.frame({ type: "session/event:assistant/message", events: [], native: {
+    type: "assistant/message", data: { message: { content: [
+      { type: "text", text: `echo ${secret}` },
+      { type: "tool-call", arguments: JSON.stringify({ value: `prefix ${secret} suffix`, keep: true }) },
+    ] } },
+  } });
+  expect(frame.body.native).toMatchObject({ data: { message: { content: [
+    { type: "text", text: "echo [redacted]" },
+    { type: "tool-call", arguments: '{"value":"prefix [redacted] suffix","keep":true}' },
+  ] } } });
 });
 
-test("keeps a native tool argument field while redacting matching payload text", () => {
+test.each([' { "id": 9007199254740993, "ratio": 3e+1 } ', 'true', 'null'])("keeps untouched encoded JSON bytes (%s)", (text) => {
   const credentials = sessionCredentialRedactor({});
-  credentials.addExplicit("arguments");
-  const native = { data: { arguments: '{"text":"arguments"}' } };
-  expect(credentials.redactValue(native)).toEqual({ data: { arguments: '{"text":"[redacted]"}' } });
+  credentials.addExplicit("true");
+  expect(credentials.redactValue({ arguments: text }, path => path[0] === "arguments")).toEqual({ arguments: text });
+});
+
+test("hides a credential-bearing key's containing object without changing the outer type", () => {
+  const credentials = sessionCredentialRedactor({});
+  credentials.addExplicit(secret);
+  const value = { arguments: JSON.stringify({ safe: true, nested: { "[redacted]": 1, [secret]: 2 } }) };
+  const sanitized = credentials.redactValue(value, path => path[0] === "arguments");
+  expect(JSON.parse(sanitized.arguments)).toEqual({ safe: true, nested: "[redacted]" });
+  expect(credentials.redactValue({ payload: { [secret]: true }, alive: true })).toEqual({ payload: "[redacted]", alive: true });
 });
 
 test("redacts ACP extension metadata before retention and observer delivery", () => {
@@ -112,14 +115,6 @@ test("redacts ACP extension metadata before retention and observer delivery", ()
   const native = { update: { _meta: { extension: { status: "[redacted]" } } } };
   expect(kernel.records()).toEqual([expect.objectContaining({ body: expect.objectContaining({ native }) })]);
   expect(live).toEqual(kernel.records());
-});
-
-test("redacts dsh argument strings without rewriting JSON literals", () => {
-  const credentials = sessionCredentialRedactor({});
-  credentials.addExplicit("true");
-  const native = { data: { arguments: String.raw`{"force":true,"message":"tr\u0075e","n":3,"x":null}` } };
-  const sanitized = credentials.redactValue(native);
-  expect(sanitized.data.arguments).toBe('{"force":true,"message":"[redacted]","n":3,"x":null}');
 });
 
 test("opening failures redact frozen native Error fields and cause data while preserving their class", async () => {
