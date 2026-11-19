@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { inspect } from "node:util";
 import { expect, test } from "vitest";
 import { mcpCredentialRedactor } from "../packages/oar/src/shared/mcp-servers.js";
-import { readEnvironmentCredential, rememberEnvironmentCredentials, sessionCredentialRedactor } from "../packages/oar/src/shared/credential-redactor.js";
+import { readEnvironmentCredential, rememberEnvironmentCredentials, sessionCredentialRedactor, type CredentialRedactionTail } from "../packages/oar/src/shared/credential-redactor.js";
 import { withSessionCredentials } from "../packages/oar/src/shared/session-credentials.js";
 import { dshOpenedFrame, foldDsh, initialDshProjection, redactDshRecord } from "../packages/oar/src/runtimes/dsh/projection.js";
 import { dshSession } from "../packages/oar/src/runtimes/dsh/session.js";
@@ -275,7 +275,7 @@ test.each(["claude", "acp", "codex"] as const)("%s sanitizes the native and JSON
 
 test("ACP withholds a split credential before observer buffering and flushes an unmatched suffix", () => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: secret } });
-  const pending = new Map<string, string>();
+  const pending = new Map<string, CredentialRedactionTail>();
   const kernel = createSessionKernel("root", record => redactAcpRecord(record, credentials, undefined, pending));
   const type = "agent_message_chunk";
   const chunk = (text: string) => kernel.frame({ type, native: { update: { sessionUpdate: type, content: { type: "text", text } } },
@@ -309,7 +309,7 @@ test("DSH redacts a credential split across text blocks in one durable message",
 
 test("Claude redacts split draft text before publishing either native or projected data", () => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: secret } });
-  const tails = { drafts: new Map<string, string>(), assistant: new Map<string, string>(), projected: new Map<string, string>(), messages: new Map<string, { id: unknown; published: boolean }>() };
+  const tails = { drafts: new Map<string, CredentialRedactionTail>(), assistant: new Map<string, CredentialRedactionTail>(), projected: new Map<string, CredentialRedactionTail>(), messages: new Map<string, { id: unknown; published: boolean }>() };
   const kernel = createSessionKernel("root", record => redactStreamJsonRecord(record, credentials, tails));
   const text = (chunk: string) => kernel.frame({ type: "stream_event", native: { type: "stream_event", event: {
     type: "content_block_delta", index: 0, delta: { type: "text_delta", text: chunk },
@@ -346,7 +346,10 @@ test("ACP withholds incomplete reasoning from native and derived records", () =>
 
 test("ACP flushes child text on its terminal lifecycle frame", () => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: secret } });
-  const pending = new Map([["child", "sentinel"]]);
+  const pending = new Map<string, CredentialRedactionTail>();
+  const tail = credentials.redactChunk("sentinel").pending;
+  expect(tail).toBeDefined();
+  if (tail !== undefined) pending.set("child", tail);
   const childNotice = () => ({ sessionId: "child", parent: "root", update: null });
   const kernel = createSessionKernel("root", record => redactAcpRecord(record, credentials, childNotice, pending));
   const frame = kernel.frame({ type: "opencode/session/child_update", native: {}, events: [{ kind: "task_ended", taskId: "child", status: "completed" }] });
@@ -389,7 +392,7 @@ test("ACP progress redacts joined output and holds credential prefixes across up
   credentials.addExplicit("token");
   credentials.addExplicit("red");
   const kernel = createSessionKernel("root", record => redactAcpRecord(record, credentials, undefined, undefined, tails));
-  const tails = new Map<string, string>();
+  const tails = new Map<string, CredentialRedactionTail>();
   const type = "tool_call_update";
   const progress = (rawOutput: unknown, callId: string) => kernel.frame({ type, native: { update: { sessionUpdate: type, toolCallId: callId, rawOutput } },
     events: [{ kind: "tool_call_progress", callId }] });
@@ -432,7 +435,7 @@ test("native-only ACP child progress withholds split credential fragments", () =
   const child = (_method: string, params: Record<string, unknown>) => ({
     sessionId: "child", parent: "root", update: params.update as Record<string, unknown>,
   });
-  const tails = new Map<string, string>();
+  const tails = new Map<string, CredentialRedactionTail>();
   const kernel = createSessionKernel("root", record => redactAcpRecord(record, credentials, child, undefined, tails));
   for (const rawOutput of ["fixture-", "token"]) {
     const frame = kernel.frame({ type: "opencode/session/child_update/after_answer", native: {
@@ -789,31 +792,51 @@ test("Claude preserves native token counters and withholds coinciding opaque key
   expect(kernel.frame({ type: "result", native, events: [] }).body.native).toEqual({ ...native, structured_output: "[redacted]" });
 });
 
+test.each([
+  ["prefix-0123456789", "9abcdefghijklmnopqrstuvwxyz123456789", "prefix-0123456789abcdefghijklmnopqrstuvwxyz123456789"],
+  ["prefix-0123456789", "789abcdefghijklmnopqrstuvwxyz123456789", "prefix-0123456789abcdefghijklmnopqrstuvwxyz123456789"],
+  ["fixture-token", "fixture-token-private", "fixture-token-private"],
+  ["protected-middle", "long-protected-middle-value", "long-protected-middle-value"],
+  ["first-protected", "second-protected", "first-protectedsecond-protected"],
+])("merges every overlap and adjacent match for %s and %s across every chunk boundary", (short, long, joined) => {
+  const credentials = sessionCredentialRedactor({ env: { API_KEY: short, MCP_TOKEN: long } });
+  const text = `before ${joined} after`;
+  const expected = "before [redacted] after";
+  expect(credentials.redact(text)).toBe(expected);
+  for (let split = 0; split <= text.length; split++) {
+    const first = credentials.redactChunk(text.slice(0, split));
+    const second = credentials.redactChunk(text.slice(split), first.pending);
+    expect(first.ready + second.ready + credentials.finishRedaction(second.pending), `split at ${split}`).toBe(expected);
+  }
+});
+
 test("redacts repeated self-overlapping credentials before retaining streamed text", () => {
   const key = "ab".repeat(10);
   const credentials = sessionCredentialRedactor({ env: { API_KEY: key } });
-  let pending = "";
+  let pending: CredentialRedactionTail | undefined;
   let live = "";
   for (let i = 0; i < 32; i++) {
-    const redacted = credentials.redactChunk(pending + "ab");
+    const redacted = credentials.redactChunk("ab", pending);
     live += redacted.ready;
     pending = redacted.pending;
-    expect(pending.length).toBeLessThan(key.length);
+    expect(pending?.text.length ?? 0).toBeLessThan(key.length);
   }
-  expect(live + credentials.redact(pending)).toBe(credentials.redact("ab".repeat(32)));
-  expect(live).toBe("[redacted]".repeat(3));
+  expect(live + credentials.finishRedaction(pending)).toBe(credentials.redact("ab".repeat(32)));
+  expect(live).toBe("[redacted]");
 });
 
 test("holds an entire shorter credential until an overlapping longer match can be determined", () => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: "fixture-token", MCP_TOKEN: "fixture-token-private" } });
   const first = credentials.redactChunk("say fixture-token");
-  expect(first).toEqual({ ready: "say ", pending: "fixture-token" });
-  expect(credentials.redactChunk(first.pending + "-private")).toEqual({ ready: "[redacted]", pending: "" });
+  expect(first.ready).toBe("say ");
+  expect(first.pending?.text).toBe("fixture-token");
+  const last = credentials.redactChunk("-private", first.pending);
+  expect(last.ready + credentials.finishRedaction(last.pending)).toBe("[redacted]");
 });
 
 test.each([['say fi', 'nal', 'say final'], ['say fi', 'xture-token', 'say [redacted]']])("Claude projected deltas reconcile %s with the assistant snapshot", (draft, remainder, expected) => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: "fixture-token", MCP_TOKEN: "api_message_id" } });
-  const tails = { drafts: new Map<string, string>(), assistant: new Map<string, string>(), projected: new Map<string, string>(), messages: new Map() };
+  const tails = { drafts: new Map<string, CredentialRedactionTail>(), assistant: new Map<string, CredentialRedactionTail>(), projected: new Map<string, CredentialRedactionTail>(), messages: new Map() };
   const kernel = createSessionKernel("root", record => redactStreamJsonRecord(record, credentials, tails));
   kernel.frame({ type: "assistant", native: { type: "assistant", message: { id: "prior", content: [{ type: "text", text: "Earlier." }] } }, events: [] });
   const native = { type: "stream_event", api_message_id: "m", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: draft } } };
@@ -828,7 +851,7 @@ test.each([['say fi', 'nal', 'say final'], ['say fi', 'xture-token', 'say [redac
 
 test("Claude keeps split thinking fragments out of retained events and redacts initial text plus deltas", () => {
   const credentials = sessionCredentialRedactor({ env: { API_KEY: secret } });
-  const tails = { drafts: new Map<string, string>(), assistant: new Map<string, string>(), projected: new Map<string, string>(), messages: new Map() };
+  const tails = { drafts: new Map<string, CredentialRedactionTail>(), assistant: new Map<string, CredentialRedactionTail>(), projected: new Map<string, CredentialRedactionTail>(), messages: new Map() };
   const kernel = createSessionKernel("root", record => redactStreamJsonRecord(record, credentials, tails));
   const chunk = (event: unknown, projected: RuntimeEventBody) =>
     kernel.frame({ type: "stream_event", native: { type: "stream_event", event }, events: [projected] });
@@ -845,7 +868,7 @@ test("Claude keeps split thinking fragments out of retained events and redacts i
 test("Claude applies one stream replacement across text blocks and withholds partial reasoning snapshots", () => {
   const key = "fixture-token";
   const credentials = sessionCredentialRedactor({ env: { API_KEY: key, MCP_TOKEN: "prefix[redacted]suffix-xyz" } });
-  const tails = { drafts: new Map<string, string>(), assistant: new Map<string, string>(), projected: new Map<string, string>(), messages: new Map() };
+  const tails = { drafts: new Map<string, CredentialRedactionTail>(), assistant: new Map<string, CredentialRedactionTail>(), projected: new Map<string, CredentialRedactionTail>(), messages: new Map() };
   const kernel = createSessionKernel("root", record => redactStreamJsonRecord(record, credentials, tails));
   const delta = (index: number, text: string) => kernel.frame({ type: "stream_event", native: { type: "stream_event", event: {
     type: "content_block_delta", index, delta: { type: "text_delta", text },
@@ -948,7 +971,7 @@ test("DSH assembled text is redacted exactly once", () => {
 test("Claude never buffers a withheld text block for a later record", () => {
   const key = "fixture-token";
   const credentials = sessionCredentialRedactor({ env: { API_KEY: key } });
-  const tails = { drafts: new Map<string, string>(), assistant: new Map<string, string>(), projected: new Map<string, string>(), messages: new Map() };
+  const tails = { drafts: new Map<string, CredentialRedactionTail>(), assistant: new Map<string, CredentialRedactionTail>(), projected: new Map<string, CredentialRedactionTail>(), messages: new Map() };
   const kernel = createSessionKernel("root", record => redactStreamJsonRecord(record, credentials, tails));
   const text = "fixture-";
   const events = [{ kind: "text_delta" as const, text }];
