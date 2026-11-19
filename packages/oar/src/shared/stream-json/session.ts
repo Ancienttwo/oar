@@ -55,7 +55,7 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
     for (const image of images ?? []) credentials.addImage(image.data);
     return nativeUserMessage(input, id, images);
   };
-  const state: StreamJsonSessionState<S> = { child, active: null, spontaneous: false, projection: profile.initial, disposed: false };
+  const state: StreamJsonSessionState<S> = { child, active: null, spontaneous: false, projection: profile.initial };
   // Hold queues until turn end; active-turn writes may steer or become an irreversible native queue.
   const commandLifecycle = profile.projection.commandLifecycle !== false;
   const writtenQueues = new Map<string, RequestRecord>();
@@ -92,10 +92,9 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
       receive(line, receivedAt);
     }
   };
-  let disposeRequest: RequestRecord | null = null;
   // BYOK change: no upstream cancellation observation window; the caller's beforeInterrupt runs synchronously before the interrupt.
   function drainHeld(): void {
-    if (state.disposed || exited || killing || kernel.unreachable() !== null || busy() || heldQueue[0]?.accepted !== true) { return; }
+    if (exited || killing || kernel.unreachable() !== null || busy() || heldQueue[0]?.accepted !== true) { return; }
     const next = heldQueue.shift();
     if (next === undefined) { return; }
     dispatching = true;
@@ -209,7 +208,7 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
     aborting.clear();
     // An exit before fallback still precedes the rejected pending controls.
     const reason = profile.exitReason?.();
-    kernel.respond(disposeRequest?.id ?? "", { kind: "exited", code, ...(reason === undefined ? {} : { reason }) });
+    kernel.processExited(code, reason);
     state.active = null;
     state.spontaneous = false;
     for (const requestId of pendingInterrupts.keys()) {
@@ -339,23 +338,13 @@ export async function streamJsonSession<S extends StreamJsonProjectionState>(
     graph: () => kernel.graph(),
     // BYOK change: the injected line process has no resources reader.
     ...(profile.contextBreakdown === undefined ? {} : { contextBreakdown: profile.contextBreakdown }),
-    dispose: guard(async () => {
-      if (state.disposed) { return; }
-      state.disposed = true;
-      // stdin ends now: no query may write to it any more.
+    dispose: guard(() => kernel.dispose(async () => {
       profile.disposing();
-      const gone = kernel.unreachable() !== null; // only an observed exit can say so before this dispose is recorded
-      disposeRequest = kernel.request("toRuntime", { kind: "dispose" });
       tasks?.end();
-      if (gone) {
-        // The exit is already recorded; nothing is left to release.
-        kernel.respond(disposeRequest.id, { kind: "accepted" });
-        return;
-      }
       if (profile.close === undefined) { child.kill(); }
       else { await profile.close(busy()); }
-      await child.exited; // release point for anything the process held; the exit response is recorded by onExit
-    }),
+      await child.exited;
+    }, () => { profile.disposing(); })),
   };
   return session;
 }
