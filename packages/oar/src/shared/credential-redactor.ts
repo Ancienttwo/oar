@@ -1,8 +1,8 @@
 // BYOK change: Modified from OAR a122061 to accept explicitly resolved credentials (Apache-2.0).
 /* oxlint-disable import/prefer-default-export -- Shared named helper. */
-import type { SessionOptions } from "../contracts/session.js";
+import type { RawEvent, SessionOptions } from "../contracts/session.js";
 import { environmentValue } from "./environment.js";
-import { redactText, type RedactionPath } from "./redact-text.js";
+import { redactText, type RedactionPath, type RedactionStructure } from "./redact-text.js";
 
 const CREDENTIAL_WORDS = new Set(["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL", "CREDENTIALS", "COOKIE", "PWD"]);
 const AUTH_HEADERS = new Set(["AUTHORIZATION", "PROXY-AUTHORIZATION"]);
@@ -26,18 +26,22 @@ function urlCredentials(value: string | null | undefined): readonly string[] {
 export interface CredentialRedactor {
   /** Private connection redaction input. Never put these values in records or diagnostics. */
   values(this: void): readonly string[];
+  hasProtectedValues(this: void): boolean;
+  matches(this: void, text: string): boolean;
+  redactChunk(this: void, text: string): { readonly ready: string; readonly pending: string };
   add(this: void, value: string | undefined): void;
   /** BYOK change: A credential the caller resolved, including short or path-like values. */
   addExplicit(this: void, value: string): void;
   /** BYOK change: suppress an echoed image payload from records and control errors. */
   addImage(this: void, data: string): void;
   redact(this: void, text: string): string;
-  redactValue<T>(this: void, value: T, jsonField?: (path: RedactionPath) => boolean): T;
+  redactValue<T>(this: void, value: T, jsonField?: (path: RedactionPath) => boolean, structure?: RedactionStructure): T;
 }
 
 /** Explicit session credentials only; runtime-native keys can be added after SDK resolution. */
 export function sessionCredentialRedactor(options: Partial<SessionOptions>): CredentialRedactor {
   const known = new Set<string>();
+  let orderedValues: readonly string[] = [];
   const add = (value: string | null | undefined): void => { if (credentialValue(value)) { known.add(value); } };
   const env = (entries: SessionOptions["env"]): void => {
     for (const [name, value] of Object.entries(entries ?? {})) {
@@ -56,30 +60,90 @@ export function sessionCredentialRedactor(options: Partial<SessionOptions>): Cre
       if (authorization) { add(/^\s*\S+\s+(.+?)\s*$/u.exec(value)?.[1]); }
     }
   }
-  let values = [...known].toSorted((left, right) => right.length - left.length);
-  const images = new Set<string>();
-  const redact = (text: string): string => {
-    for (const data of images) text = text.replaceAll(data, "[redacted]");
-    return values.reduce((result, value) => result.replaceAll(value, "[redacted]"), text);
+  const refresh = (): void => { orderedValues = [...known].toSorted((left, right) => right.length - left.length); };
+  refresh();
+  const redactTextParts = (text: string, streaming: boolean): { ready: string; pending: string } => {
+    const keys = orderedValues;
+    let cut = text.length;
+    if (streaming) {
+      for (const key of keys) {
+        for (let size = Math.min(key.length - 1, text.length); size > text.length - cut; size--) {
+          if (text.endsWith(key.slice(0, size))) { cut = text.length - size; break; }
+        }
+      }
+    }
+    const parts: string[] = [];
+    let at = 0;
+    while (at < cut) {
+      let next = cut;
+      let length = 0;
+      for (const key of keys) {
+        const match = text.indexOf(key, at);
+        if (match >= 0 && match < next) { next = match; length = key.length; }
+      }
+      parts.push(text.slice(at, next));
+      if (length !== 0) parts.push("[redacted]");
+      at = next + length;
+    }
+    return { ready: parts.join(""), pending: text.slice(at) };
   };
+  const redact = (text: string): string => redactTextParts(text, false).ready;
+  const matches = (text: string): boolean => orderedValues.some(value => text.includes(value));
   const addKnown = (value: string): void => {
     if (value.length !== 0 && !known.has(value)) {
       known.add(value);
-      values = [...known].toSorted((left, right) => right.length - left.length);
+      refresh();
     }
   };
   return {
-    values: () => values,
+    values: () => orderedValues,
+    hasProtectedValues: () => orderedValues.length !== 0,
+    matches,
+    redactChunk: text => redactTextParts(text, true),
     add(value) {
       if (credentialValue(value)) { addKnown(value); }
     },
     addExplicit: addKnown,
-    addImage(data) {
-      if (data.length !== 0) images.add(data);
-    },
+    addImage: addKnown,
     redact,
-    redactValue: (value, jsonField) => values.length === 0 && images.size === 0 ? value : redactText(value, redact, jsonField),
+    redactValue: (value, jsonField, structure) => orderedValues.length === 0 ? value : redactText(value, redact, jsonField, structure, matches),
   };
+}
+
+function eventPath(path: RedactionPath): boolean {
+  return path[0] === "body" && path[1] === "events" && typeof path[2] === "number";
+}
+
+export function isProjectedToolInput(record: RawEvent, path: RedactionPath): boolean {
+  const [,, index, field] = path;
+  if (record.kind !== "frame" || path.length !== 4 || !eventPath(path) || typeof index !== "number" || field !== "input") return false;
+  const kind = record.body.events[index]?.kind;
+  return kind === "tool_call_started" || kind === "tool_call_input";
+}
+
+/** Keep the typed record and event discriminators out of the content traversal. */
+export function redactRuntimeRecord<T extends RawEvent>(
+  record: T, redact: CredentialRedactor["redactValue"], jsonField?: (path: RedactionPath) => boolean,
+  isProtocolString?: (path: RedactionPath, value: string) => boolean,
+  isProtocolKey?: (path: RedactionPath, key: string) => boolean,
+): T {
+  return redact(record, jsonField, {
+    string(path, value) {
+      const [body, field, , eventField, nestedField] = path;
+      return (path.length === 1 && (body === "kind" || body === "direction"))
+        || (path.length === 2 && body === "body" && (field === "kind" || (field === "code" && record.kind === "response")))
+        || (eventPath(path) && ((path.length === 4 && (eventField === "kind"
+          || (eventField === "result" && (value === "ok" || value === "failed"))))
+          || (path.length === 5 && eventField === "outcome" && (nestedField === "kind" || nestedField === "failure"))))
+        || isProtocolString?.(path, value) === true;
+    },
+    keys(path, key) {
+      return path.length === 0 || (path.length === 1 && path[0] === "body")
+        || (path.length === 3 && eventPath(path))
+        || (path.length === 4 && eventPath(path) && path[3] === "outcome")
+        || isProtocolKey?.(path, key) === true;
+    },
+  });
 }
 
 /**
