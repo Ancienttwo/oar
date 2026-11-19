@@ -71,7 +71,7 @@ export function createAcpRouting<T>(options: {
     }
     return redactTokenShapes(credentialValues.reduce((result, value) => result.replaceAll(value, "[redacted]"), text));
   };
-  const safe = <V>(value: V): V => redactText(value, redact, (text) => redact(text) !== text);
+  const safe = <V>(value: V): V => redactText(value, redact);
   const report = (entry: Omit<AcpUnattributed, "reason">, reason: AcpUnattributed["reason"]): void => {
     try { options.diagnostic(safe({ ...entry, reason })); } catch { /* Observer failure is isolated. */ }
   };
