@@ -1,3 +1,4 @@
+// BYOK change: The caller can retain held-pipe process identities in its own cleanup authority (Apache-2.0).
 import type { ChildProcess } from "node:child_process";
 import type { Stream } from "node:stream";
 import type { HeldPipe, HeldPipes } from "./process-cleanup-diagnostics.js";
@@ -57,12 +58,12 @@ async function readGroup(root: number): Promise<{ readonly table: ProcessTableOb
  * root's group as their holders (by pid and start). Undefined when every one
  * closed while the table was read: then OAR closed nothing.
  */
-async function closeHeld(child: ChildProcess, root: number, held: readonly OpenPipe[], started: number): Promise<HeldPipes | undefined> {
+async function closeHeld(child: ChildProcess, root: number, held: readonly OpenPipe[], started: number, retainHolders: typeof ownLeftProcesses): Promise<HeldPipes | undefined> {
   const { table, group } = await readGroup(root);
   const open = held.filter((pipe) => !isClosed(pipe.stream));
   if (open.length === 0) { return undefined; }
   // What the host-exit hook then ends as if the pipes were open: each only while it is the same process.
-  ownLeftProcesses(child, group);
+  retainHolders(child, group);
   for (const pipe of open) { pipe.stream.destroy(); }
   return {
     waitedMs: Math.round(performance.now() - started),
@@ -101,7 +102,7 @@ export function mergeHeldPipes(one: HeldPipes | undefined, other: HeldPipes | un
  * (ownership.ts). Never throws: a failed table read still closes the pipes
  * and is reported.
  */
-export async function closePipesAfterExit(child: ChildProcess, pipes: readonly NamedPipe[], limitMs: number = PIPE_CLOSE_MS, onLater?: (held: HeldPipes) => void, unreadLimitMs: number = UNREAD_LIMIT_MS): Promise<HeldPipes | undefined> {
+export async function closePipesAfterExit(child: ChildProcess, pipes: readonly NamedPipe[], limitMs: number = PIPE_CLOSE_MS, onLater?: (held: HeldPipes) => void, unreadLimitMs: number = UNREAD_LIMIT_MS, retainHolders = ownLeftProcesses): Promise<HeldPipes | undefined> {
   const open = pipes.filter((pipe): pipe is OpenPipe => pipe.stream !== null && pipe.stream !== undefined && !isClosed(pipe.stream));
   const root = child.pid;
   // Windows has no process groups to name holders by, and taskkill ends the tree.
@@ -117,10 +118,10 @@ export async function closePipesAfterExit(child: ChildProcess, pipes: readonly N
   clearTimeout(timer);
   if (outcome !== "expired") { return undefined; }
   const waiting = open.filter((pipe) => !isClosed(pipe.stream) && unread(pipe.stream));
-  if (waiting.length > 0) { closeOnceTaken(child, root, waiting, started, onLater, unreadLimitMs); }
+  if (waiting.length > 0) { closeOnceTaken(child, root, waiting, started, onLater, unreadLimitMs, retainHolders); }
   const held = open.filter((pipe) => isHeld(pipe.stream));
   if (held.length === 0) { return undefined; }
-  const report = await closeHeld(child, root, held, started);
+  const report = await closeHeld(child, root, held, started, retainHolders);
   return report;
 }
 
@@ -135,7 +136,7 @@ export async function closePipesAfterExit(child: ChildProcess, pipes: readonly N
  * once what it left has gone. Then the root's group is owned by identity, as
  * when OAR closes a pipe, and the pipe is left to the reader.
  */
-function closeOnceTaken(child: ChildProcess, root: number, waiting: readonly OpenPipe[], started: number, onLater: ((held: HeldPipes) => void) | undefined, limitMs: number): void {
+function closeOnceTaken(child: ChildProcess, root: number, waiting: readonly OpenPipe[], started: number, onLater: ((held: HeldPipes) => void) | undefined, limitMs: number, retainHolders: typeof ownLeftProcesses): void {
   let pending = [...waiting];
   const stop = (): void => { clearInterval(recheck); clearTimeout(giveUp); };
   const recheck = setInterval(() => {
@@ -144,7 +145,7 @@ function closeOnceTaken(child: ChildProcess, root: number, waiting: readonly Ope
     if (pending.length === 0) { stop(); }
     if (taken.length === 0) { return; }
     void (async (): Promise<void> => {
-      const held = await closeHeld(child, root, taken, started);
+      const held = await closeHeld(child, root, taken, started, retainHolders);
       if (held !== undefined) { onLater?.(held); }
     })();
   }, PAUSED_RECHECK_MS);
@@ -153,7 +154,7 @@ function closeOnceTaken(child: ChildProcess, root: number, waiting: readonly Ope
     if (!pending.some((pipe) => !isClosed(pipe.stream))) { return; }
     void (async (): Promise<void> => {
       const { group } = await readGroup(root);
-      ownLeftProcesses(child, group);
+      retainHolders(child, group);
     })();
   }, limitMs);
   recheck.unref();
