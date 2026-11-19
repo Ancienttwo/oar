@@ -189,7 +189,6 @@ async function openAcpRuntimeSession(
       throw error;
     }
 
-    let disposeRequest: RequestRecord | null = null;
     const capabilities = { ...profile.capabilities, images: profile.capabilities.images ?? acpTakesImages(opened.initialized) };
     let compaction: ReturnType<typeof manualCompaction> | null = null;
     const promptUsage = (response: JsonRecord): RuntimeEventBody | null => tokenUsage.prompt(response, opened.initialized);
@@ -236,7 +235,7 @@ async function openAcpRuntimeSession(
       void terminalHost.dispose().catch(() => {});
       // An outcome only oar observes: answers our dispose when we caused the
       // exit, stands alone (requestId "") when the runtime died on its own.
-      kernel.respond(disposeRequest?.id ?? "", { kind: "exited", code });
+      kernel.processExited(code);
       turns.onExit();
     });
 
@@ -304,26 +303,7 @@ async function openAcpRuntimeSession(
       records: () => kernel.records(),
       graph: () => kernel.graph(),
       // BYOK change: no `resources` reader; the SDK process-tree authority owns the tree.
-      dispose: guard(async () => {
-        if (disposeRequest !== null) {
-          // Already released: the stream holds our dispose request. BYOK change:
-          // a retry after a failed terminal reap reaps what is still alive.
-          await terminalHost.dispose();
-          return;
-        }
-        // Read BEFORE this dispose is recorded: only an observed exit can say
-        // so here, and it is the stream's word, not an adapter flag.
-        const gone = kernel.unreachable() !== null;
-        disposeRequest = kernel.request("toRuntime", { kind: "dispose" });
-        if (gone) {
-          // The exit is already recorded (an unrequested `exited` response, requestId "");
-          // nothing is left to release, so the dispose is answered here, as
-          // the claude and codex adapters do (kimi 0.42.0 kill-runtime run,
-          // 2026-09-11: the dispose request stood unanswered before this).
-          kernel.respond(disposeRequest.id, { kind: "accepted" });
-          await terminalHost.dispose();
-          return;
-        }
+      dispose: guard(() => kernel.dispose(async () => {
         // BYOK change: no prepareShutdown/markNativeStop; the SDK process-tree
         // authority reads the descendants itself before it signals the tree.
         // BYOK change: the abort records the descendants and starts the cancel
@@ -339,6 +319,6 @@ async function openAcpRuntimeSession(
         runtime.kill();
         await runtime.exited;
         await terminalHost.dispose();
-      }),
+      }, () => terminalHost.dispose())),
     };
 }

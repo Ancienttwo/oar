@@ -198,7 +198,6 @@ async function openCodexSession(
   const busy = (): boolean => nativeBusy() || compaction.busy();
   const abortFallback = createAbortFallback(() => { client.kill(); });
   const turnProcesses = codexTurnProcesses(kernel, options.endTurnProcessesOnAbort === true ? hooks.turnProcessReader : undefined);
-  let disposeRequest: RequestRecord | null = null;
   // A resume's effort update in flight: codex's thread/settings/updated answers it.
   let settingsWaiter: ((params: JsonRecord) => void) | null = null;
 
@@ -334,7 +333,7 @@ async function openCodexSession(
     turnProcesses.exited();
     // The exit is an outcome only oar observes: it answers our dispose when
     // we caused it, and stands alone when the app-server died on its own.
-    kernel.respond(disposeRequest?.id ?? "", { kind: "exited", code, ...(reason === undefined ? {} : { reason }) });
+    kernel.processExited(code, reason);
     state.active = null;
     state.spontaneous = false;
     state.codexTurnId = null;
@@ -462,23 +461,12 @@ async function openCodexSession(
     rawEvents: (observer, cursor) => kernel.rawEvents(observer, cursor),
     records: () => kernel.records(),
     graph: () => kernel.graph(),
-    dispose: guard(async () => {
-      if (disposeRequest !== null) {
-        return;
-      }
-      const gone = kernel.unreachable() !== null; // only an observed exit can say so before this dispose is recorded
-      disposeRequest = kernel.request("toRuntime", { kind: "dispose" });
-      if (gone) {
-        // The exit is already recorded; nothing is left to release.
-        kernel.respond(disposeRequest.id, { kind: "accepted" });
-        return;
-      }
+    dispose: guard(() => kernel.dispose(async () => {
       client.kill();
-      // Await the actual exit: the process may hold state (codex's sqlite
-      // runtime in CODEX_HOME) that the next session needs released. The
-      // exit response is recorded by onExit.
+      // Wait for the process and its isolated turn cleanup to release their resources.
       await client.exited;
-    }),
+      await turnProcesses.settled();
+    })),
   };
   return session;
   } catch (error) {
