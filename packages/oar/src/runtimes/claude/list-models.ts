@@ -1,4 +1,5 @@
 // BYOK change: Modified from OAR 609f347 for caller-owned reader processes and explicit environments (Apache-2.0).
+import { withQueryDeadline } from "../../shared/executable/query.js";
 import type { OwnedReaderOptions } from "../../contracts/list-models.js";
 import type { AvailableInstallation } from "../../contracts/installation.js";
 import { randomUUID } from "node:crypto";
@@ -74,34 +75,31 @@ function controlError(inner: JsonRecord): string {
  * provider env and apiKeyHelper live there — so authentication is unaffected.
  */
 async function readListModels(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
-  const child = options.spawn(command, [
-    "-p",
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--settings", "{\"disableAllHooks\":true}",
-    "--strict-mcp-config",
-    "--mcp-config", "{\"mcpServers\":{}}",
-  ], { cwd: listingCwd(options), env: claudeEnv(options.env) });
-  const requestId = `oar-list-models-${randomUUID()}`;
-  const { promise: answered, resolve } = Promise.withResolvers<JsonRecord | null>();
-  child.onLine((line) => {
-    const message = asRecord(parseJson(line));
-    if (message?.type !== "control_response") {
-      return;
-    }
-    const inner = asRecord(message.response);
-    if (inner?.request_id === requestId) {
-      resolve(inner);
-    }
-  });
-  child.onExit(() => {
-    resolve(null);
-  });
-  const timer = setTimeout(() => {
-    child.kill();
-  }, options.timeoutMs);
-  try {
+  return withQueryDeadline("Claude model listing", options.timeoutMs, async (_signal, own) => {
+    const child = own(options.spawn(command, [
+      "-p",
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--settings", "{\"disableAllHooks\":true}",
+      "--strict-mcp-config",
+      "--mcp-config", "{\"mcpServers\":{}}",
+    ], { cwd: listingCwd(options), env: claudeEnv(options.env) }));
+    const requestId = `oar-list-models-${randomUUID()}`;
+    const { promise: answered, resolve } = Promise.withResolvers<JsonRecord | null>();
+    child.onLine((line) => {
+      const message = asRecord(parseJson(line));
+      if (message?.type !== "control_response") {
+        return;
+      }
+      const inner = asRecord(message.response);
+      if (inner?.request_id === requestId) {
+        resolve(inner);
+      }
+    });
+    child.onExit(() => {
+      resolve(null);
+    });
     await child.spawned;
     child.write(`${JSON.stringify({
       type: "control_request",
@@ -120,11 +118,7 @@ async function readListModels(command: string, options: OwnedReaderOptions): Pro
       return { kind: "unauthenticated", detail };
     }
     return { kind: "error", detail };
-  } finally {
-    clearTimeout(timer);
-    child.kill();
-    await child.exited;
-  }
+  }, undefined, options.signal);
 }
 
 async function readOutcome(command: string, options: OwnedReaderOptions): Promise<ReadOutcome> {
