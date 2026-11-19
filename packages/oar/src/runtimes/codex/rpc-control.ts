@@ -14,7 +14,7 @@ import { asRecord, type JsonRecord } from "../../shared/json.js";
 import type { SessionKernel } from "../../shared/session-kernel.js";
 import type { AppServerClient } from "./app-server-client.js";
 import type { CodexOpenMethod } from "./open.js";
-import { codexForkThroughRefusal, codexOpenFailure } from "./refusal.js";
+import { codexOpenFailure } from "./refusal.js";
 
 export interface RpcControlPlan {
   readonly body: RequestBody;
@@ -121,17 +121,14 @@ function resumeError(method: string, resumeId: string | undefined, cause: JsonRe
 /**
  * The open RPCs, with their failure named after the method (a refused resume
  * must say `thread/resume`: "no rollout found for thread id …" alone does
- * not). A fork's source (`resumeId`) is read with the resume's words, and a
- * fork through a turn on a codex without `lastTurnId` is refused unsent. The session opener owns process cleanup on every failure.
+ * not). The session opener owns process cleanup on every failure.
  */
 export async function openThread(
   method: CodexOpenMethod,
   send: () => Promise<JsonRecord>,
-  context: { readonly version: string | null; readonly serviceTier?: string | undefined; readonly resumeId?: string | undefined; readonly through?: string | undefined },
+  context: { readonly version: string | null; readonly serviceTier?: string | undefined; readonly resumeId?: string | undefined },
 ): Promise<JsonRecord> {
   const { serviceTier, resumeId } = context;
-  const outdatedFork = method === "thread/fork" ? codexForkThroughRefusal(context.version, context.through) : null;
-  if (outdatedFork !== null) { throw outdatedFork; }
   try {
     return await send();
   } catch (error) {
