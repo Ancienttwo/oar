@@ -1,6 +1,7 @@
 /* oxlint-disable import/prefer-default-export -- Shared named helper. */
 interface RedactionShape {
   readonly key: (key: string, path: readonly string[]) => string;
+  readonly text?: (text: string, path: readonly string[]) => string | undefined;
   readonly preserve: (key: string, value: unknown, owner: object, path: readonly string[]) => boolean;
 }
 
@@ -10,7 +11,10 @@ export function redactText<T>(value: T, redact: (text: string) => string, contai
   const preserve = shape?.preserve;
   const scanned = new Set<object>();
   const matches = (entry: unknown, path: readonly string[]): boolean => {
-    if (typeof entry === "string") { return contains(entry); }
+    if (typeof entry === "string") {
+      const transformed = shape?.text?.(entry, path);
+      return transformed === undefined ? contains(entry) : transformed !== entry;
+    }
     if (entry === null || typeof entry !== "object" || scanned.has(entry)) { return false; }
     scanned.add(entry);
     if (Array.isArray(entry)) { return entry.some((item) => matches(item, path)); }
@@ -27,7 +31,7 @@ export function redactText<T>(value: T, redact: (text: string) => string, contai
 
   const seen = new Map<object, unknown>();
   const copy = (entry: unknown, path: readonly string[]): unknown => {
-    if (typeof entry === "string") { return redact(entry); }
+    if (typeof entry === "string") { return shape?.text?.(entry, path) ?? redact(entry); }
     if (entry === null || typeof entry !== "object") { return entry; }
     if (seen.has(entry)) { return seen.get(entry); }
     if (Array.isArray(entry)) {
