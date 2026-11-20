@@ -21,7 +21,7 @@ function argv(): readonly string[] {
   return spawnLineProcess.mock.calls[0]?.[1] ?? [];
 }
 
-function expectNotRecorded(session: Session): void {
+function expectNotRecorded(session: Pick<Session, "records">): void {
   expect(JSON.stringify(session.records())).not.toContain(SECRET);
 }
 
@@ -61,7 +61,11 @@ test("codex: the host's flags go after oar's -c overrides and before --listen", 
     process.emit(`${JSON.stringify({ id: message.id, result })}\n`);
   }));
   const launchArgs = ["-c", 'service_tier="fast"', "-c", `note="${SECRET}"`];
-  const session = await codexSession({ kind: "available", via: "executable", command: "codex", version: "0.161.0" }, { cwd: "/work", launchArgs });
+  const spawn = (command: string, args: readonly string[]) => {
+    const child = spawnLineProcess(command, args);
+    return Object.assign(child, { writeAcknowledged: async (text: string): Promise<void> => { child.write(text); } });
+  };
+  const session = await codexSession(spawn, { kind: "available", via: "executable", command: "codex", version: "0.161.0" }, { cwd: "/work", env: {}, launchArgs });
   try {
     expectCodexPlacement(argv(), launchArgs);
     expectNotRecorded(session);

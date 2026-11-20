@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { afterEach, expect, test, vi } from "vitest";
-import { prepareOpenCodePrompts, validateOpenCodePrompts, verifyOpenCodeAgent } from "../../packages/oar/src/runtimes/opencode/prompt-config.js";
+import { type ExecutableRunner, prepareOpenCodePrompts, validateOpenCodePrompts, verifyOpenCodeAgent } from "../../packages/oar/src/runtimes/opencode/prompt-config.js";
 import { prepareOpenCodeV2Prompts, verifyOpenCodeAgents } from "../../packages/oar/src/runtimes/opencode/prompt-config-v2.js";
-import type { ExecutableRunner } from "../../packages/oar/src/shared/executable/run.js";
 import { asRecord } from "../../packages/oar/src/shared/json.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -60,10 +59,10 @@ test.each(["systemPrompt", "appendSystemPrompt"] as const)("existing inline conf
   const run = vi.fn<ExecutableRunner>();
   const given = { cwd: "/project", [option]: "text" };
   await expect(prepareOpenCodePrompts("opencode", { ...given, env: { OPENCODE_CONFIG_CONTENT: "{}" } }, run)).rejects.toMatchObject({ name: "UnsupportedOptionError", option });
-  vi.stubEnv("OPENCODE_CONFIG_CONTENT", "");
-  await expect(prepareOpenCodePrompts("opencode", given, run)).rejects.toMatchObject({ name: "UnsupportedOptionError", option });
+  await expect(prepareOpenCodePrompts("opencode", { ...given, env: { OPENCODE_CONFIG_CONTENT: "" } }, run)).rejects.toMatchObject({ name: "UnsupportedOptionError", option });
   expect(run).not.toHaveBeenCalled();
-  expect(() => { validateOpenCodePrompts({ cwd: "/project" }); }).not.toThrow();
+  vi.stubEnv("OPENCODE_CONFIG_CONTENT", "host-only-config");
+  expect(() => { validateOpenCodePrompts(given); }).not.toThrow();
 });
 
 test("empty replacement cannot silently select built-in instructions", () => {

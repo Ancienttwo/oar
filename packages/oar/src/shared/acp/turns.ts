@@ -41,7 +41,7 @@ export interface ActiveTurn {
   readonly answered: Set<number>;
   abortRequested: boolean;
   /** BYOK change: the answer of the cancel write in flight, shared by an abort that arrives meanwhile. */
-  cancelWrite?: Promise<ResponseBody>;
+  cancelWrite?: Promise<ResponseBody> | undefined;
   /** BYOK change: settled when the turn closes, for an abort fenced after the prompt answer was decoded. */
   closed?: PromiseWithResolvers<void>;
   /** BYOK change: a cancel write of this turn did not complete within its bound; this turn writes no second one. */
