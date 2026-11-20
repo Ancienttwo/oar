@@ -29,11 +29,11 @@ test("numeric identifiers order below alphanumeric ones, build metadata is ignor
   expect(compareSemver("not-a-version", "1.0.0")).toBeNull();
 });
 
-test("a refusal names the real version; an unreadable one is never assumed supported", () => {
+test("a refusal names a parsed version and omits unreadable native output", () => {
   expect(dshVersionRefusal("0.2.1-rc.5")).toBeNull();
   expect(dshVersionRefusal("0.2.2-alpha.2")).toBeNull();
   expect(dshVersionRefusal("0.2.1-rc.4")).toBe("DSH 0.2.1-rc.4 is below the supported floor; OAR requires 0.2.1-rc.5 or later");
-  expect(dshVersionRefusal("nightly")).toBe('DSH reported the unreadable version "nightly"; OAR requires 0.2.1-rc.5 or later');
+  expect(dshVersionRefusal("nightly")).toBe("DSH reported an unreadable version; OAR requires 0.2.1-rc.5 or later");
   expect(dshVersionRefusal(undefined)).toBe("DSH did not report a version; OAR requires 0.2.1-rc.5 or later");
 });
 

@@ -140,8 +140,12 @@ export const claudeProjectionProfile: StreamJsonProjectionProfile<ClaudeProjecti
   },
   user: (state, message, root) => root && state.lastAssistantUuid !== null && contentBlocks(message).some((block) => block.type === "tool_result") ? { ...state, lastAssistantUuid: null } : state,
   result: (state, message, agentPath) => {
+    const key = pathKey(agentPath);
+    const outcome = resultOutcome(state, message, state.assistantFailures.get(key));
+    const remaining = new Map(state.assistantFailures);
+    remaining.delete(key);
     if (agentPath.length > 0) {
-      return { state, outcome: resultOutcome(state, message), before: [], after: [] };
+      return { state: { ...state, assistantFailures: remaining }, outcome, before: [], after: [] };
     }
     const accumulated = accumulate(state, agentPath, message);
     const running = foldModelUsage(state.modelUsage, message);
@@ -155,14 +159,9 @@ export const claudeProjectionProfile: StreamJsonProjectionProfile<ClaudeProjecti
         ...(cacheWriteByTtl === undefined ? {} : { cacheWriteByTtl }),
       } });
     }
-    const root = agentPath.length === 0;
-    const key = pathKey(agentPath);
-    const outcome = resultOutcome(state, message, state.assistantFailures.get(key));
-    const remaining = new Map(state.assistantFailures);
-    remaining.delete(key);
     // No anchor on an aborted turn: a fork through it loses the interruption (lastAssistantUuid).
-    const anchor = root && outcome.kind !== "aborted" ? state.lastAssistantUuid : null;
-    return { state: { ...(accumulated?.state ?? state), modelUsage: running.usage, context: reading, assistantFailures: remaining, ...(root ? { lastAssistantUuid: null } : {}) },
+    const anchor = outcome.kind === "aborted" ? null : state.lastAssistantUuid;
+    return { state: { ...(accumulated?.state ?? state), modelUsage: running.usage, context: reading, assistantFailures: remaining, lastAssistantUuid: null },
       outcome, before, ...(anchor === null ? {} : { forkAnchor: anchor }) };
   },
   init: claudeServiceTierEvents,

@@ -1,11 +1,13 @@
 import { manualCompaction } from "../packages/oar/src/shared/manual-compaction.js";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { DSH_BRIDGE_PROTOCOL } from "../packages/oar/src/runtimes/dsh/bridge.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
+import { redactJsonText } from "../packages/oar/src/shared/redact-text.js";
 import { mcpCredentialRedactor } from "../packages/oar/src/shared/mcp-servers.js";
-import { readEnvironmentCredential, rememberEnvironmentCredentials, sessionCredentialRedactor, type CredentialRedactionTail } from "../packages/oar/src/shared/credential-redactor.js";
+import { readEnvironmentCredential, redactRuntimeRecord, rememberEnvironmentCredentials, sessionCredentialRedactor, type CredentialRedactionTail } from "../packages/oar/src/shared/credential-redactor.js";
 import { withSessionCredentials } from "../packages/oar/src/shared/session-credentials.js";
 import { dshOpenedFrame, foldDsh, initialDshProjection, redactDshRecord } from "../packages/oar/src/runtimes/dsh/projection.js";
 import { dshSession } from "../packages/oar/src/runtimes/dsh/session.js";
@@ -190,6 +192,43 @@ test("DSH opening refuses a private model mismatch without reporting the withhel
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// oxlint-disable-next-line max-statements -- Verify native writes and retained replies on the same owned session.
+test("DSH sends images to the native process and redacts their echoes in every input control", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "oar-dsh-image-"));
+  const payload = Buffer.from("synthetic image bytes");
+  const imagePath = join(directory, "fixture.png");
+  const child = fakeLineProcess((line, runtime) => {
+    const request = JSON.parse(line);
+    const result = request.method === "open"
+      ? { sessionId: request.sessionId, methods: { steer: true }, imageTypes: ["image/png"] }
+      : { images: request.images };
+    runtime.emit(`${JSON.stringify({ type: "response", id: request.id, result })}\n`);
+  });
+  const subscribe = child.onLine.bind(child);
+  try {
+    await writeFile(imagePath, payload);
+    const session = await dshSession(() => Object.assign(child, {
+      observeDescendants() {},
+      writeAcknowledged: async (text: string): Promise<void> => { child.write(text); },
+      onLine(handler: (line: string) => void) {
+        subscribe(handler);
+        queueMicrotask(() => child.emit(`${JSON.stringify({ type: "ready", protocol: DSH_BRIDGE_PROTOCOL })}\n`));
+      },
+    }), { kind: "available", via: "executable", command: "dsh" }, {
+      cwd: directory, launch: { directory, patches: [], env: {} },
+    });
+    try {
+      const image = { images: [{ path: imagePath }] };
+      for (const method of [session.prompt, session.steer, session.queue]) {
+        const result = await method("fixture text", image);
+        expect(result.response.body).toMatchObject({ kind: "accepted", native: { images: [{ data: "[redacted]", mediaType: "image/png" }] } });
+        expect(child.written.at(-1)).toContain(payload.toString("base64"));
+      }
+      expect(JSON.stringify(session.records())).not.toContain(payload.toString("base64"));
+    } finally { await session.dispose(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("redacts an unknown dsh turn reason containing a quoted credential", () => {
@@ -1197,6 +1236,44 @@ test("readEnvironmentCredential registers inherited runtime credentials with cas
   expect(redactor.redact(`seen ${secret} and ${secret}-db and short`)).toBe("seen [redacted] and [redacted] and short");
 });
 
+
+test("explicit environment readers never look up a missing key in the host environment", () => {
+  const environmentKey = "OAR_FIXTURE_HOST_ONLY_TOKEN";
+  vi.stubEnv(environmentKey, secret);
+  try {
+    const redactor = sessionCredentialRedactor({ env: {} });
+    expect(readEnvironmentCredential({}, environmentKey, redactor)).toBeUndefined();
+    rememberEnvironmentCredentials(redactor, {}, [environmentKey]);
+    expect(redactor.hasProtectedValues()).toBe(false);
+  } finally { vi.unstubAllEnvs(); }
+});
+
+test("credential matches preserve record, request, response and event discriminants", () => {
+  const credentials = sessionCredentialRedactor({});
+  for (const word of ["request", "toRuntime", "prompt", "response", "rejected", "runtime_refused", "frame", "tool_call_ended", "ok", "failed", "turn_ended", "unknown"]) {
+    credentials.addExplicit(word);
+  }
+  const kernel = createSessionKernel("fixture", record => redactRuntimeRecord(record, credentials.redactValue));
+  const request = kernel.request("toRuntime", { kind: "prompt", input: "request toRuntime prompt" });
+  expect(request).toMatchObject({ kind: "request", direction: "toRuntime", body: { kind: "prompt", input: "[redacted] [redacted] [redacted]" } });
+  expect(kernel.respond(request.id, { kind: "rejected", code: "runtime_refused", reason: "response rejected runtime_refused" })).toMatchObject({
+    kind: "response", body: { kind: "rejected", code: "runtime_refused", reason: "[redacted] [redacted] [redacted]" },
+  });
+  expect(kernel.frame({ type: "fixture", native: { note: "frame" }, events: [
+    { kind: "tool_call_ended", callId: "first", result: "ok" },
+    { kind: "tool_call_ended", callId: "second", result: "failed" },
+    { kind: "turn_ended", outcome: { kind: "failed", failure: "unknown", reason: "turn_ended unknown" } },
+  ] })).toMatchObject({ kind: "frame", body: { native: { note: "[redacted]" }, events: [
+    { kind: "tool_call_ended", result: "ok" },
+    { kind: "tool_call_ended", result: "failed" },
+    { kind: "turn_ended", outcome: { kind: "failed", failure: "unknown", reason: "[redacted] [redacted]" } },
+  ] } });
+});
+
+test("malformed encoded JSON is withheld as null", () => {
+  const redactor = sessionCredentialRedactor({ env: { API_KEY: secret } });
+  expect(redactJsonText(`{ "payload": "${secret}"`, redactor.redact, redactor.matches)).toBe("null");
+});
 
 test.each(["create", "refusal", "observation"] as const)("compact %s reasons use the session record redactor", async (mode) => {
   const open = withSessionCredentials(async (_installation, _options, credentials) => {
