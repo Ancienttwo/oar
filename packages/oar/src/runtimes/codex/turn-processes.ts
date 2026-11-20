@@ -2,7 +2,7 @@
 /* oxlint-disable import/max-dependencies -- This guard composes control plans, process-table reads and the record stream. */
 import type { SessionCleanup } from "../../contracts/placement.js";
 import type { RequestRecord } from "../../contracts/session.js";
-import { processTableFailure, type ProcessEntry, type ProcessTable, type ProcessTableObservation, type SignalReport } from "../../shared/executable/process-tree.js";
+import { processTableFailure, type ProcessTable, type ProcessTableObservation, type SignalReport } from "../../shared/executable/process-tree.js";
 import { endTurnEntries, turnEntries, type ProcessTableReading } from "../../shared/executable/process-turn-scope.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
 import type { SessionKernel } from "../../shared/session-kernel.js";
