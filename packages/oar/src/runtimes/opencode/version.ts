@@ -12,7 +12,7 @@ import type { SessionOptions } from "../../contracts/session.js";
 export interface OpencodeRelease { readonly major: 1 | 2; readonly minor: number; readonly patch: number; readonly version: string }
 
 /** The two independently maintained native lines share one command name. */
-export async function opencodeRelease(installation: ExecutableInstallation, options?: Pick<SessionOptions, "cwd" | "env"> & { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<OpencodeRelease> {
+export async function opencodeRelease(installation: ExecutableInstallation, _options?: Pick<SessionOptions, "cwd" | "env"> & { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<OpencodeRelease> {
   // BYOK: the SDK probes once using its selected executable and process boundary.
   const version = installation.version;
   if (version === undefined) throw new Error("opencode requires a probed executable version");

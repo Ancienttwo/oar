@@ -114,11 +114,6 @@ function refusalOf(error: unknown): ResponseBody {
   return { kind: "rejected", code: "runtime_refused", reason: error.message, native: error.native };
 }
 
-const inputFields = (text: string, inputId: string | undefined, images: readonly LoadedImage[]): JsonRecord => ({
-  text, ...(inputId === undefined ? {} : { inputId }),
-  ...(images.length === 0 ? {} : { images: images.map(({ data, mediaType }) => ({ data, mediaType })) }),
-});
-
 async function open(spawnLineProcess: SpawnDshLineProcess, command: string, options: DshSessionOptions, hooks: DshSessionHooks, credentials: CredentialRedactor, mcpRows: readonly JsonRecord[]): Promise<DshAdapterSession> {
   const sessionId = options.resume ?? randomUUID();
   const agentOptions = dshAgentOptions(options);
@@ -186,6 +181,13 @@ async function open(spawnLineProcess: SpawnDshLineProcess, command: string, opti
   const send = async (method: string, payload: JsonRecord): Promise<ResponseBody> => {
     try { return { kind: "accepted", native: await control.request(method, { sessionId, ...payload }) }; }
     catch (error) { return kernel.unreachable() ?? refusalOf(error); }
+  };
+  const inputFields = (text: string, inputId: string | undefined, images: readonly LoadedImage[]): JsonRecord => {
+    for (const { data } of images) { credentials.addImage(data); }
+    return {
+      text, ...(inputId === undefined ? {} : { inputId }),
+      ...(images.length === 0 ? {} : { images: images.map(({ data, mediaType }) => ({ data, mediaType })) }),
+    };
   };
   let prompting = false;
   const active = (): boolean => projection.sessions[sessionId]?.turnOpen === true;
