@@ -204,7 +204,7 @@ function sessionEvent(state: DshProjection, sessionId: string, session: DshSessi
     case "assistant/attempt":
       return { ...spent(session, attemptUsage(retainedData?.stream), false), links: state.links };
     case "request/context":
-      return { session: { ...session, contextWindow: asNumber(retainedData?.contextWindow) ?? session.contextWindow }, links: state.links, events: [] };
+      return { session: { ...session, contextWindow: asNumber(retainedData?.contextWindow) }, links: state.links, events: [] };
     case "request/header": {
       const config = asRecord(asRecord(data.header)?.config);
       return { links: state.links, ...selection(session, config?.provider, config?.model, config?.reasoningEffort) };
