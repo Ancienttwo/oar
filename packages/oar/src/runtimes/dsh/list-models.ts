@@ -7,6 +7,7 @@ import { effortLevelsOf } from "../../shared/effort-levels.js";
 import { asRecord, asRecordList, type JsonRecord } from "../../shared/json.js";
 import { DshCommandError, dshControl } from "./control.js";
 import { launchDsh, type DshLaunch } from "./launch.js";
+import { profileWaitReason, type DshProfileWait } from "./profile-startup.js";
 import { dshVersionUnsupported } from "./version.js";
 
 /** The native catalog as `Session.model` selectors. A provider that could not list is not a model; the caller decides what no model means. */
@@ -63,8 +64,10 @@ export async function dshListModels(installation: AvailableInstallation, options
   if (installation.via !== "executable") { return { kind: "unsupported", reason: "DSH model listing requires its executable" }; }
   const refusal = dshVersionUnsupported(installation.version);
   if (refusal !== null) { return refusal; }
-  return withQueryDeadline("DSH model listing", options.timeoutMs, async (_signal, own) => {
-    const { child, profileLoaded } = await launchDsh(options.spawn, installation.command, launch);
+  const profileWait: DshProfileWait = {};
+  return withQueryDeadline<ListModelsResult>("DSH model listing", options.timeoutMs, async (signal, own) => {
+    // BYOK change: the cold-profile wait ends with the listing's deadline or the caller's abort.
+    const { child, profileLoaded } = await launchDsh(options.spawn, installation.command, launch, { signal, profileWait });
     own(child);
     const control = dshControl(child, () => {}, undefined, profileLoaded);
     try {
@@ -75,5 +78,9 @@ export async function dshListModels(installation: AvailableInstallation, options
       if (error instanceof DshCommandError && error.code === "native_method_unavailable") { return { kind: "unsupported", reason: "DSH does not expose its native model catalog" }; }
       throw error;
     }
-  }, undefined, options.signal);
+  }, undefined, options.signal).catch((error: unknown) => {
+    const reason = profileWaitReason(profileWait);
+    if (reason !== undefined && error instanceof Error && error.name === "TimeoutError") { throw new DOMException(reason, "TimeoutError"); }
+    throw error;
+  });
 }
