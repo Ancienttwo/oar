@@ -1,4 +1,3 @@
-// BYOK change: Modified from OAR 4f767ca to read inline configuration from the explicit environment only (Apache-2.0).
 import { parseTree, type Node, type ParseError } from "jsonc-parser";
 import { UnsupportedOptionError } from "../../contracts/errors.js";
 import type { SessionOptions } from "../../contracts/session.js";
@@ -17,7 +16,7 @@ function root(content: string, option: PromptOption): Node {
 }
 
 export function inlineContent(options: SessionOptions): string | undefined {
-  return sessionEnvironment(options.env, {}).OPENCODE_CONFIG_CONTENT;
+  return sessionEnvironment(options.env).OPENCODE_CONFIG_CONTENT;
 }
 
 export function validateOpenCodePrompts(options: SessionOptions): void {

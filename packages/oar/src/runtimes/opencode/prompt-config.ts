@@ -4,13 +4,12 @@ import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { UnsupportedOptionError } from "../../contracts/errors.js";
 import type { SessionOptions } from "../../contracts/session.js";
+import { checkResume } from "../../shared/session-options.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
 import { privateTempDir } from "../../shared/private-temp.js";
 
 // BYOK: native configuration queries use the SDK-owned terminal process seam.
 export type ExecutableRunner = (command: string, args: readonly string[], options: { cwd: string; env: Readonly<Record<string, string | undefined>>; timeoutMs: number }) => Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number | null }>;
-
-import { inlineContent, promptContent, validateOpenCodePrompts } from "./inline-prompt-config.js";
 
 export interface OpenCodePromptConfig {
   readonly options: SessionOptions;
@@ -21,7 +20,20 @@ export interface OpenCodePromptConfig {
   readonly cleanup: () => Promise<void>;
 }
 
-export { validateOpenCodePrompts } from "./inline-prompt-config.js";
+export function validateOpenCodePrompts(options: SessionOptions): void {
+  checkResume(options);
+  const option = options.systemPrompt !== undefined ? "systemPrompt" : "appendSystemPrompt";
+  if (options.systemPrompt === undefined && options.appendSystemPrompt === undefined) {
+    return;
+  }
+  if (sessionEnvironment(options.env, {}).OPENCODE_CONFIG_CONTENT !== undefined) {
+    throw new UnsupportedOptionError(option, "opencode prompt options require OPENCODE_CONFIG_CONTENT, which is already set in the effective session environment");
+  }
+  // An empty agent.prompt selects the built-in prompt in native request.ts.
+  if (options.systemPrompt === "") {
+    throw new UnsupportedOptionError("systemPrompt", "opencode treats an empty agent prompt as its built-in prompt, so it cannot replace the system prompt with an empty string");
+  }
+}
 
 async function query(command: string, args: readonly string[], options: SessionOptions, run: ExecutableRunner): Promise<JsonRecord> {
   const result = await run(command, args, { cwd: options.cwd, env: sessionEnvironment(options.env, {}), timeoutMs: 30_000 });
@@ -104,35 +116,21 @@ export async function instructionsFile(text: string | undefined): Promise<{ read
   return { path: file, cleanup };
 }
 
-/** Include host config in discovery, then verify the final inline config with the same native reader. */
-export async function preparePromptOptions(
-  options: SessionOptions, group: "agent" | "agents", agents: readonly string[], verify: (merged: SessionOptions, file: string | undefined) => Promise<void>,
-): Promise<OpenCodePromptConfig> {
-  const instructions = await instructionsFile(options.appendSystemPrompt);
-  try {
-    const content = promptContent(options, group, agents, instructions.path);
-    const merged = { ...options, env: { ...options.env, OPENCODE_CONFIG_CONTENT: content } };
-    if (inlineContent(options) !== undefined) { await verify(merged, instructions.path); }
-    return { options: merged, cleanup: instructions.cleanup };
-  } catch (error) {
-    await instructions.cleanup();
-    throw error;
-  }
+/** OpenCode interpolates {env:...}/{file:...} BEFORE parsing JSON. Escape only those opening braces so prompt text survives literally. */
+export function configContent(overlay: JsonRecord): string {
+  return JSON.stringify(overlay).replaceAll(/\{(?=env:|file:)/gu, String.raw`\u007b`);
 }
 
+/** Native config overlay only; never copy, merge or rewrite user config. */
 export async function prepareOpenCodePrompts(command: string, options: SessionOptions, run: ExecutableRunner): Promise<OpenCodePromptConfig> {
   validateOpenCodePrompts(options);
   const agent = options.systemPrompt === undefined ? undefined : await activeAgent(command, options, run);
-  const prepared = await preparePromptOptions(options, "agent", agent === undefined ? [] : [agent], async (merged, file) => {
-    const resolved = await query(command, ["debug", "config"], merged, run);
-    if (agent !== undefined && asRecord(asRecord(resolved.agent)?.[agent])?.prompt !== options.systemPrompt) {
-      throw new UnsupportedOptionError("systemPrompt", `opencode debug config did not confirm agent.${agent}.prompt`);
-    }
-    if (file !== undefined && (!Array.isArray(resolved.instructions) || resolved.instructions.at(-1) !== file)) {
-      throw new UnsupportedOptionError("appendSystemPrompt", "opencode debug config did not confirm the last instructions entry");
-    }
-  });
-  return { ...prepared, ...(agent === undefined ? {} : { agent }) };
+  const instructions = await instructionsFile(options.appendSystemPrompt);
+  const overlay = {
+    ...(agent === undefined ? {} : { agent: { [agent]: { prompt: options.systemPrompt } } }),
+    ...(instructions.path === undefined ? {} : { instructions: [instructions.path] }),
+  };
+  return { options: { ...options, env: { ...options.env, OPENCODE_CONFIG_CONTENT: configContent(overlay) } }, ...(agent === undefined ? {} : { agent }), cleanup: instructions.cleanup };
 }
 
 /** The agent the ACP open reports, from the mode config option or the legacy modes block. */
