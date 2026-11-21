@@ -5,7 +5,7 @@ import { sessionEnvironment } from "../../shared/environment.js";
 import { processFailure, StderrTail } from "../../shared/executable/diagnostics.js";
 import { reportedStderr } from "../../shared/executable/reported-stderr.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
-import { preparePromptOptions, type ExecutableRunner, openedAgent, validateOpenCodePrompts, type OpenCodePromptConfig } from "./prompt-config.js";
+import { configContent, type ExecutableRunner, instructionsFile, openedAgent, validateOpenCodePrompts, type OpenCodePromptConfig } from "./prompt-config.js";
 import { opencodeV2PromptRefusals } from "./options.js";
 import { acquireOpenCodeStartup } from "./startup-gate.js";
 import type { OpencodeRelease } from "./version.js";
@@ -22,7 +22,7 @@ async function gated<T>(options: SessionOptions, work: () => Promise<T>): Promis
  * environment and directory. Subagents and hidden agents (compaction, title)
  * keep their native prompts.
  */
-async function primaryAgents(command: string, options: SessionOptions, run: ExecutableRunner, credentials: CredentialRedactor): Promise<readonly { id: string; system: unknown }[]> {
+async function primaryAgents(command: string, options: SessionOptions, run: ExecutableRunner, credentials: CredentialRedactor): Promise<readonly string[]> {
   // oxlint-disable-next-line typescript/promise-function-async -- the runner already returns its promise.
   const result = await gated(options, () => run(command, ["debug", "agents", "--standalone"], { cwd: options.cwd, env: sessionEnvironment(options.env, {}), timeoutMs: 30_000 }));
   if (!result.ok) {
@@ -37,7 +37,7 @@ async function primaryAgents(command: string, options: SessionOptions, run: Exec
     throw new TypeError("opencode debug agents returned no agent list while resolving the session's agents");
   }
   const agents = listed.map((entry) => asRecord(entry)).flatMap((entry) =>
-    entry !== null && typeof entry.id === "string" && entry.mode !== "subagent" && entry.hidden !== true ? [{ id: entry.id, system: entry.system }] : []);
+    entry !== null && typeof entry.id === "string" && entry.mode !== "subagent" && entry.hidden !== true ? [entry.id] : []);
   if (agents.length === 0) {
     throw new UnsupportedOptionError("systemPrompt", "opencode reports no visible primary agent whose system prompt could be replaced");
   }
@@ -60,17 +60,13 @@ export async function prepareOpenCodeV2Prompts(command: string, release: Opencod
     const reason = refused[option];
     if (options[option] !== undefined && reason !== undefined) { throw new UnsupportedOptionError(option, reason); }
   }
-  const primary = options.systemPrompt === undefined ? undefined : await primaryAgents(command, options, run, credentials);
-  const agents = primary?.map(entry => entry.id);
-  const prepared = await preparePromptOptions(options, "agents", agents ?? [], async (merged) => {
-    const confirmed = await primaryAgents(command, merged, run, credentials);
-    for (const id of agents ?? []) {
-      if (confirmed.find(entry => entry.id === id)?.system !== options.systemPrompt) {
-        throw new UnsupportedOptionError("systemPrompt", `opencode debug agents did not confirm agents.${id}.system`);
-      }
-    }
-  });
-  return { ...prepared, ...(agents === undefined ? {} : { agents }) };
+  const agents = options.systemPrompt === undefined ? undefined : await primaryAgents(command, options, run, credentials);
+  const instructions = await instructionsFile(options.appendSystemPrompt);
+  const overlay = {
+    ...(agents === undefined ? {} : { agents: Object.fromEntries(agents.map((agent) => [agent, { system: options.systemPrompt }])) }),
+    ...(instructions.path === undefined ? {} : { instructions: [instructions.path] }),
+  };
+  return { options: { ...options, env: { ...options.env, OPENCODE_CONFIG_CONTENT: configContent(overlay) } }, ...(agents === undefined ? {} : { agents }), cleanup: instructions.cleanup };
 }
 
 export function verifyOpenCodeAgents(response: JsonRecord, expected: readonly string[]): void {
