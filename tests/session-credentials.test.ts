@@ -1185,16 +1185,53 @@ test.each(["ollama", "EMPTY", "none", "x", "/path/to/credential", "~/credential"
 });
 
 
-test("MCP ordinary env and headers remain unchanged in records and error text", () => {
+test("MCP env and header values are credentials whatever their name or shape, except values under eight characters", () => {
   const servers = [
-    { name: "local", command: "echo", env: { DEBUG: "true", LOG_LEVEL: "debug", NODE_ENV: "production", TOKEN: "short", SECRET: "/path/to/secret" } },
-    { name: "remote", type: "http" as const, url: "http://localhost", headers: { "Content-Type": "application/json" } },
+    { name: "local", command: "echo", env: { DEBUG: "true", LOG_LEVEL: "debug", NODE_ENV: "production", TOKEN: "short", HOST_ACCESS: "abc12345", SECRET: "/path/to/secret" } },
+    { name: "remote", type: "http" as const, url: "http://localhost", headers: { "Content-Type": "application/json", Accept: "*/*" } },
   ];
   const { redactValue } = sessionCredentialRedactor({ cwd: "/work", mcpServers: servers });
   const kernel = createSessionKernel("session", redactValue);
-  const body = { type: "tool/output", native: { text: "debug is true in production, application/json, short, /path/to/secret" }, events: [] };
-  expect(kernel.frame(body).body).toBe(body);
-  expect(mcpCredentialRedactor(servers)(body.native.text)).toBe(body.native.text);
+  const body = { type: "tool/output", native: { text: "debug is true, short, */*; production abc12345 /path/to/secret application/json" }, events: [] };
+  const redacted = "debug is true, short, */*; [redacted] [redacted] [redacted] [redacted]";
+  expect(kernel.frame(body).body).toEqual({ ...body, native: { text: redacted } });
+  expect(mcpCredentialRedactor(servers)(body.native.text)).toBe(redacted);
+});
+
+test("credentials are also redacted with one and two levels of JSON escaping", () => {
+  const value = 'mcp-"quoted"-\\value';
+  const once = JSON.stringify(value).slice(1, -1);
+  const twice = JSON.stringify(once).slice(1, -1);
+  const fromMcp = sessionCredentialRedactor({ mcpServers: [{ name: "local", command: "echo", env: { HOST_ACCESS: value } }] });
+  const fromCaller = sessionCredentialRedactor({});
+  fromCaller.addExplicit(value);
+  for (const { redact } of [fromMcp, fromCaller]) {
+    expect(redact(`${value} ${once} ${twice} ${JSON.stringify({ env: { HOST_ACCESS: value } })}`)).toBe('[redacted] [redacted] [redacted] {"env":{"HOST_ACCESS":"[redacted]"}}');
+  }
+});
+
+test("values() returns credentials as registered, so passing them to another redactor's add registers no escaped forms twice", () => {
+  const value = 'mcp-"quoted"-\\value';
+  const source = sessionCredentialRedactor({ env: { API_KEY: secret }, mcpServers: [{ name: "local", command: "echo", env: { HOST_ACCESS: value } }] });
+  expect(source.values()).toEqual([secret, value]);
+  const target = sessionCredentialRedactor({});
+  for (const credential of source.values()) { target.add(credential); }
+  const again = sessionCredentialRedactor({});
+  for (const credential of target.values()) { again.add(credential); }
+  expect(again.values()).toEqual(source.values());
+  const thrice = JSON.stringify(JSON.stringify(JSON.stringify(value).slice(1, -1)).slice(1, -1)).slice(1, -1);
+  expect(again.redact(thrice)).not.toContain("[redacted]");
+});
+
+test("connection-string passwords and bare authorization tokens are redacted with their JSON escaping", () => {
+  const password = 'db-"pass"\\word';
+  const token = "/opt/secret-123";
+  const { redact } = sessionCredentialRedactor({ mcpServers: [
+    { name: "db", command: "echo", env: { DATABASE_URL: `postgres://user:${encodeURIComponent(password)}@localhost/db` } },
+    { name: "remote", type: "http" as const, url: "http://localhost", headers: { Authorization: `Bearer ${token}` } },
+  ] });
+  const once = JSON.stringify(password).slice(1, -1);
+  expect(redact(`${password} ${once} ${JSON.stringify(once).slice(1, -1)} ${token}`)).toBe("[redacted] [redacted] [redacted] [redacted]");
 });
 
 test.each(["Authorization", "Proxy-Authorization", "Cookie", "X-Api-Key", "Api-Key", "X-Service-Token", "x-custom-secret"])("MCP credential header %s uses shared record and error redaction", (name) => {
@@ -1220,7 +1257,8 @@ test.each([false, true])("env connection strings protect full URLs and encoded/d
   const env = { DATABASE_URL: `postgres://user:${encoded}@localhost/db`, MONGODB_URI: `mongodb+srv://user:${secret}@localhost/db`, REDIS_URL: `redis://:${secret}@localhost:6379`, PUBLIC_URL: "http://localhost:3000" };
   const options = mcp ? { mcpServers: [{ name: "db", command: "echo", env }] } : { env };
   const { redactValue } = sessionCredentialRedactor(options);
-  expect(redactValue({ urls: Object.values(env), encoded, decoded, password: secret })).toEqual({ urls: ["[redacted]", "[redacted]", "[redacted]", "http://localhost:3000"], encoded: "[redacted]", decoded: "[redacted]", password: "[redacted]" });
+  // Every MCP env value of eight or more characters is a credential, so only the top-level env keeps the public URL.
+  expect(redactValue({ urls: Object.values(env), encoded, decoded, password: secret })).toEqual({ urls: ["[redacted]", "[redacted]", "[redacted]", mcp ? "[redacted]" : "http://localhost:3000"], encoded: "[redacted]", decoded: "[redacted]", password: "[redacted]" });
 });
 
 test("connection URLs with short passwords redact only the whole URL", () => {
