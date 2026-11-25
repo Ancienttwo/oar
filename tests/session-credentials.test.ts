@@ -1185,15 +1185,16 @@ test.each(["ollama", "EMPTY", "none", "x", "/path/to/credential", "~/credential"
 });
 
 
-test("MCP env and header values are credentials whatever their name or shape, except values under eight characters", () => {
+test("MCP env and header values are credentials whatever their name or path shape when they are long and not plain words", () => {
   const servers = [
-    { name: "local", command: "echo", env: { DEBUG: "true", LOG_LEVEL: "debug", NODE_ENV: "production", TOKEN: "short", HOST_ACCESS: "abc12345", SECRET: "/path/to/secret" } },
-    { name: "remote", type: "http" as const, url: "http://localhost", headers: { "Content-Type": "application/json", Accept: "*/*" } },
+    { name: "local", command: "echo", env: { DEBUG: "true", LOG_LEVEL: "debug", NODE_ENV: "production", TOKEN: "short", SECRET: "/path/to/secret", HOST_ACCESS: "abc12345", SERVICE_REF: "/opt/secret-123", LOGIN_BLOB: 'long"quoted\\value' } },
+    { name: "remote", type: "http" as const, url: "http://localhost", headers: { "Content-Type": "application/json", Accept: "*/*", "X-Route": "service.internal-name" } },
   ];
   const { redactValue } = sessionCredentialRedactor({ cwd: "/work", mcpServers: servers });
   const kernel = createSessionKernel("session", redactValue);
-  const body = { type: "tool/output", native: { text: "debug is true, short, */*; production abc12345 /path/to/secret application/json" }, events: [] };
-  const redacted = "debug is true, short, */*; [redacted] [redacted] [redacted] [redacted]";
+  const readable = "debug is true, short, */*; production application/json /path/to/secret service.internal-name";
+  const body = { type: "tool/output", native: { text: `${readable} abc12345 /opt/secret-123 long"quoted\\value` }, events: [] };
+  const redacted = `${readable} [redacted] [redacted] [redacted]`;
   expect(kernel.frame(body).body).toEqual({ ...body, native: { text: redacted } });
   expect(mcpCredentialRedactor(servers)(body.native.text)).toBe(redacted);
 });
@@ -1257,7 +1258,7 @@ test.each([false, true])("env connection strings protect full URLs and encoded/d
   const env = { DATABASE_URL: `postgres://user:${encoded}@localhost/db`, MONGODB_URI: `mongodb+srv://user:${secret}@localhost/db`, REDIS_URL: `redis://:${secret}@localhost:6379`, PUBLIC_URL: "http://localhost:3000" };
   const options = mcp ? { mcpServers: [{ name: "db", command: "echo", env }] } : { env };
   const { redactValue } = sessionCredentialRedactor(options);
-  // Every MCP env value of eight or more characters is a credential, so only the top-level env keeps the public URL.
+  // A long MCP env value with a digit or a colon is a credential whatever its name, so only the top-level env keeps the public URL.
   expect(redactValue({ urls: Object.values(env), encoded, decoded, password: secret })).toEqual({ urls: ["[redacted]", "[redacted]", "[redacted]", mcp ? "[redacted]" : "http://localhost:3000"], encoded: "[redacted]", decoded: "[redacted]", password: "[redacted]" });
 });
 
