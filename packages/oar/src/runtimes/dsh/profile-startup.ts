@@ -1,3 +1,4 @@
+// BYOK change: Modified from OAR 19ccd9a to load node:sqlite through process.getBuiltinModule (Apache-2.0).
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
@@ -31,7 +32,10 @@ export async function acquireDshProfile(env: NodeJS.ProcessEnv, cwd: string, sig
   signal?.throwIfAborted();
   const directory = profileDirectory(env, cwd);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const { DatabaseSync } = await import("node:sqlite");
+  // BYOK change: the built-in lookup needs no module resolution, including in CJS bundles and SEA executables.
+  const sqlite = process.getBuiltinModule("node:sqlite");
+  if (!sqlite) { throw new Error("node:sqlite is not available in this runtime"); }
+  const { DatabaseSync } = sqlite;
   const db = new DatabaseSync(path.join(directory, ".oar-startup.sqlite"));
   try {
     for (;;) {
