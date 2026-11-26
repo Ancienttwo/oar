@@ -1,9 +1,25 @@
+// BYOK change: Modified from OAR 87c0929 to spawn through the caller-owned reader process (Apache-2.0).
 import { randomBytes } from "node:crypto";
-import { spawnLineProcess, type LineProcess } from "../../shared/executable/index.js";
+import type { OwnedReaderOptions } from "../../contracts/list-models.js";
+import type { LineProcess } from "../codex/app-server-client.js";
 import type { OwnQueryProcess } from "../../shared/executable/query.js";
 import { nativeRows } from "../../shared/inventory.js";
 import { asRecord, parseJson, type JsonRecord } from "../../shared/json.js";
-import { serveEnvironment } from "./provider-auth-server.js";
+
+// BYOK change: provider-auth-server.ts's serveEnvironment, inlined so the login server and its process layer stay out of the vendored closure.
+function serveEnvironment(env: Readonly<Record<string, string>>, password: string, modelsFetch: "disable" | "inherit"): Record<string, string> {
+  const inherited = { ...env };
+  delete inherited.OPENCODE_SERVER_USERNAME;
+  return {
+    ...inherited,
+    // OpenCode reads OPENCODE_PASSWORD first, then OPENCODE_SERVER_PASSWORD.
+    OPENCODE_PASSWORD: password,
+    OPENCODE_SERVER_PASSWORD: password,
+    OPENCODE_DISABLE_AUTOUPDATE: "1",
+    ...(modelsFetch === "disable" ? { OPENCODE_DISABLE_MODELS_FETCH: "1" } : {}),
+    ...(process.platform === "win32" ? {} : { BROWSER: "true" }),
+  };
+}
 
 type Catalog = "models" | "skills";
 
@@ -35,15 +51,12 @@ async function query(origin: string, password: string, cwd: string, signal: Abor
 }
 
 /** Start a private foreground listener tied to the owning query's deadline and cleanup. */
-export async function openDiscoveryServer(command: string, cwd: string, env: NodeJS.ProcessEnv, catalog: Catalog, signal: AbortSignal, own: OwnQueryProcess) {
+// BYOK change: the caller's spawn owns the process tree and its shutdown; own() kills and awaits it when the query ends.
+export async function openDiscoveryServer(spawn: OwnedReaderOptions["spawn"], command: string, cwd: string, env: Readonly<Record<string, string>>, catalog: Catalog, signal: AbortSignal, own: OwnQueryProcess) {
   const password = randomBytes(24).toString("base64url");
-  // The native models CLI's standalone server ends when the host's stdin pipe closes.
   const args = ["serve", ...(catalog === "models" ? ["--stdio"] : []), "--hostname", "127.0.0.1", "--port", "0"];
   const childEnv = serveEnvironment(env, password, catalog === "models" ? "inherit" : "disable");
-  const child = own(spawnLineProcess(command, args, {
-    cwd, env: childEnv, killTree: true, inheritStderr: false,
-    ...(catalog === "models" ? { shutdown: "stdin" } : {}),
-  }));
+  const child = own(spawn(command, args, { cwd, env: childEnv }));
   const [, origin] = await Promise.all([child.spawned, endpoint(child, catalog, signal)]);
   return async (path: string): Promise<JsonRecord[]> => {
     const rows = await query(origin, password, cwd, signal, path);
