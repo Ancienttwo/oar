@@ -1,5 +1,6 @@
+// BYOK change: Modified from OAR 87c0929 to take the caller-owned reader spawn (Apache-2.0).
 import { setTimeout as delay } from "node:timers/promises";
-import type { ListModelsResult, ModelEntry } from "../../contracts/list-models.js";
+import type { ListModelsResult, ModelEntry, OwnedReaderOptions } from "../../contracts/list-models.js";
 import type { OwnQueryProcess } from "../../shared/executable/query.js";
 import { nativeRows } from "../../shared/inventory.js";
 import type { JsonRecord } from "../../shared/json.js";
@@ -27,8 +28,8 @@ function projectV2Model(row: JsonRecord): ModelEntry {
   };
 }
 
-export async function listV2Models(command: string, cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal, own: OwnQueryProcess): Promise<ListModelsResult> {
-  const read = await openDiscoveryServer(command, cwd, env, "models", signal, own);
+export async function listV2Models(spawn: OwnedReaderOptions["spawn"], command: string, cwd: string, env: Readonly<Record<string, string>>, signal: AbortSignal, own: OwnQueryProcess): Promise<ListModelsResult> {
+  const read = await openDiscoveryServer(spawn, command, cwd, env, "models", signal, own);
   // The native one-shot CLI polls for its first plugins for up to five seconds.
   // On 2.4.0+, package plugins can still add models after this snapshot.
   const until = performance.now() + 5000;
