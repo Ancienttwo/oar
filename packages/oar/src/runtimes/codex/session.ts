@@ -71,7 +71,7 @@ function scrubOutputJson(raw: string, secretById: ReadonlyMap<string, boolean>):
   return JSON.stringify({ answers: Object.fromEntries(entries) });
 }
 
-function scrubOutput(output: unknown, secretById: ReadonlyMap<string, boolean>): unknown {
+function scrubOutput(output: unknown, secretById: ReadonlyMap<string, boolean>): string | JsonRecord[] {
   if (typeof output === "string") return scrubOutputJson(output, secretById) ?? REDACTED;
   if (!Array.isArray(output) || output.length === 0) return REDACTED;
   const parts: JsonRecord[] = [];
