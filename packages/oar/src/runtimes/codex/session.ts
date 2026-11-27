@@ -36,6 +36,7 @@ import { foldCodexNotification, initialCodexProjection, type CodexProjectionStat
 import { prepareCodexOpenParams } from "./open-config.js";
 import { missingDirectoryError, nameThread, openThread, rpcControl, updateThreadEffort, type RpcControlPlan } from "./rpc-control.js";
 import { codexControlRefusal, codexVersion } from "./refusal.js";
+import { createCodexSecretAnswers } from "./secret-answers.js";
 
 /*
  * App-server v2: RPC replies answer controls; notifications carry facts.
@@ -83,7 +84,8 @@ export async function codexSession(
     readonly onNativeIdentity?: (method: string, identity: JsonRecord) => void;
     // BYOK change: caller-owned, bounded native request lifecycle; no permissive fallback.
     readonly onServerRequest?: (id: string | number, method: string, params: JsonRecord, reply: {
-      respond(value: JsonRecord): Promise<void>; reject(code: number, message: string): Promise<void>; cancelled(): void;
+      respond(value: JsonRecord, freeTextAnswers?: ReadonlyMap<string, string>): Promise<void>;
+      reject(code: number, message: string): Promise<void>; cancelled(): void;
     }) => void;
     // BYOK change: caller-owned steps on this app-server client, before the thread open request and after its read-back.
     readonly beforeOpen?: (request: CodexOpenStepRequest, params: JsonRecord) => Promise<JsonRecord>;
@@ -407,8 +409,11 @@ async function openCodexSession(
   // transport-only turn id and the control decisions (busy, spontaneous).
   let lastNotifiedRootTurnId: string | undefined;
   const draftTails = new Map<string, Map<string | undefined, Map<string, CredentialRedactionTail>>>();
+  const secretAnswers = createCodexSecretAnswers(credentials.add);
   const onNotification = (method: string, params: JsonRecord): void => {
-    // BYOK change: Retain the exact native notification before any potentially throwing fold.
+    // BYOK change: Short secrets and selected labels need structural scrubbing before retention and projection.
+    params = secretAnswers.scrubNotification(method, params);
+    // BYOK change: Retain the scrubbed native notification before any potentially throwing fold.
     // The record envelope's sessionId puts a foreign thread in the graph (observe/graph.ts); no out-of-band node.
     const notificationSession = typeof params.threadId === "string" ? params.threadId : threadId;
     const isRoot = notificationSession === threadId;
@@ -573,7 +578,10 @@ async function openCodexSession(
       };
       try {
         hooks.onServerRequest(id, method, params, {
-          respond: value => send(() => client.respond(id, value), { kind: "accepted" }),
+          respond: (value, freeTextAnswers) => send(() => {
+            if (method === "item/tool/requestUserInput") secretAnswers.recordAnswer(params, freeTextAnswers);
+            return client.respond(id, value);
+          }, { kind: "accepted" }),
           cancelled() {
             claimed = true; record({ kind: "rejected", code: "error", reason: "native request cancelled" });
           },
@@ -611,6 +619,7 @@ async function openCodexSession(
   // the reply), then whatever codex wrote after the reply.
   client.handle({ onNotification, onServerRequest });
   client.onExit((code, reason) => {
+    secretAnswers.clear();
     abortFallback.clear();
     turnProcesses.exited();
     // The exit is an outcome only oar observes: it answers our dispose when
@@ -747,7 +756,7 @@ async function openCodexSession(
     dispose: guard(() => kernel.dispose(async () => {
       client.kill();
       // Wait for release of the process and its resources. Turn cleanup is synchronous.
-      await client.exited;
+      try { await client.exited; } finally { secretAnswers.clear(); }
     })),
   };
   return session;
