@@ -46,29 +46,39 @@ import { codexControlRefusal, codexVersion } from "./refusal.js";
  * BYOK change: server requests go to an explicit caller-owned native interaction handler, or are declined/rejected immediately when absent.
  */
 
-// BYOK change: OAR #1205 adapted to the caller-owned native request hook.
+// BYOK change: OAR #1205 adapted to the caller-owned native request hook. An
+// item shared by multiple requests keeps every question classification until
+// its pending echoes are read. Secret classification wins on a reused ID.
 const REDACTED = "[redacted]";
 
-function scrubOutputJson(raw: string, secretIds: ReadonlySet<string>): string | undefined {
+interface PendingUserInput {
+  readonly secretById: Map<string, boolean>;
+  hasSecret: boolean;
+  awaitingEchoes: number;
+}
+
+function scrubOutputJson(raw: string, secretById: ReadonlyMap<string, boolean>): string | undefined {
   const answers = asRecord(asRecord(parseJson(raw))?.answers);
   if (answers === null) return undefined;
   const entries: [string, { answers: string[] }][] = [];
   for (const [id, entry] of Object.entries(answers)) {
+    const secret = secretById.get(id);
     const values = asRecord(entry)?.answers;
-    if (!Array.isArray(values) || !values.every((value): value is string => typeof value === "string")) return undefined;
-    entries.push([id, { answers: secretIds.has(id) ? values.map(() => REDACTED) : values }]);
+    // An unrecognized ID could carry a secret under a different key.
+    if (secret === undefined || !Array.isArray(values) || !values.every((value): value is string => typeof value === "string")) return undefined;
+    entries.push([id, { answers: secret ? values.map(() => REDACTED) : values }]);
   }
   return JSON.stringify({ answers: Object.fromEntries(entries) });
 }
 
-function scrubOutput(output: unknown, secretIds: ReadonlySet<string>): unknown {
-  if (typeof output === "string") return scrubOutputJson(output, secretIds) ?? REDACTED;
+function scrubOutput(output: unknown, secretById: ReadonlyMap<string, boolean>): unknown {
+  if (typeof output === "string") return scrubOutputJson(output, secretById) ?? REDACTED;
   if (!Array.isArray(output) || output.length === 0) return REDACTED;
   const parts: JsonRecord[] = [];
   for (const part of output) {
     const record = asRecord(part);
     if (record === null || (record.type !== "input_text" && record.type !== "output_text") || typeof record.text !== "string") return REDACTED;
-    const text = scrubOutputJson(record.text, secretIds);
+    const text = scrubOutputJson(record.text, secretById);
     if (text === undefined) return REDACTED;
     parts.push({ type: record.type, text });
   }
@@ -76,29 +86,34 @@ function scrubOutput(output: unknown, secretIds: ReadonlySet<string>): unknown {
 }
 
 function createCodexSecretAnswers(addCredential: (value: string) => void) {
-  const pending = new Map<string, ReadonlySet<string>>();
+  const pending = new Map<string, PendingUserInput>();
   return {
     recordAnswer(params: JsonRecord, freeTextAnswers?: ReadonlyMap<string, string>): void {
       const { itemId, questions } = params;
       if (typeof itemId !== "string" || itemId === "" || !Array.isArray(questions)) return;
-      const secretIds = new Set<string>();
+      const item = pending.get(itemId) ?? { secretById: new Map<string, boolean>(), hasSecret: false, awaitingEchoes: 0 };
       for (const question of questions) {
         const native = asRecord(question);
-        if (native?.isSecret !== true || typeof native.id !== "string") continue;
-        secretIds.add(native.id);
+        if (typeof native?.id !== "string" || typeof native.isSecret !== "boolean") continue;
+        item.secretById.set(native.id, native.isSecret || item.secretById.get(native.id) === true);
+        if (!native.isSecret) continue;
+        item.hasSecret = true;
         const freeText = freeTextAnswers?.get(native.id);
         if (freeText !== undefined && freeText !== "") addCredential(freeText);
       }
-      if (secretIds.size !== 0) pending.set(itemId, secretIds);
+      item.awaitingEchoes += 1;
+      pending.set(itemId, item);
     },
     scrubNotification(method: string, params: JsonRecord): JsonRecord {
       if (method !== "rawResponseItem/completed" || pending.size === 0) return params;
       const item = asRecord(params.item);
       if (item?.type !== "function_call_output" || typeof item.call_id !== "string") return params;
-      const secretIds = pending.get(item.call_id);
-      if (secretIds === undefined) return params;
-      pending.delete(item.call_id);
-      return { ...params, item: { ...item, output: scrubOutput(item.output, secretIds) } };
+      const request = pending.get(item.call_id);
+      if (request === undefined) return params;
+      request.awaitingEchoes -= 1;
+      if (request.awaitingEchoes === 0) pending.delete(item.call_id);
+      if (!request.hasSecret) return params;
+      return { ...params, item: { ...item, output: scrubOutput(item.output, request.secretById) } };
     },
     clear(): void { pending.clear(); },
   };
